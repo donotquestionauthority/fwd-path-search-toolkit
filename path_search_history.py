@@ -654,7 +654,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="row">
         <label>Days back</label>
         <input type="number" id="days-back" value="30" min="1" max="365">
-        <span class="hint">max snapshots in window</span>
+        <span class="hint">all snapshots in this window are queried</span>
       </div>
       <div class="card-sep"></div>
       <div class="toggle-row" style="margin-bottom:8px">
@@ -676,29 +676,7 @@ HTML = r"""<!DOCTYPE html>
   <!-- ── RIGHT ── -->
   <div class="right">
 
-    <!-- Run bar -->
-    <div style="display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;flex-wrap:wrap">
-      <button class="btn-primary" id="run-btn" onclick="runHistory()">▶ Run Audit</button>
-      <button class="btn-secondary" id="stop-btn" onclick="stopAudit()" disabled>■ Stop</button>
-      <div style="flex:1;min-width:160px">
-        <div id="progress-label" class="progress-label" style="margin-bottom:4px">Ready.</div>
-        <div class="progress-wrap" style="margin:0"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
-      </div>
-    </div>
-
-    <!-- Timeline -->
-    <div class="card" style="padding:12px 16px">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-        <span style="font-size:0.68rem;font-weight:700;color:var(--accent);letter-spacing:0.12em">── TIMELINE</span>
-        <span style="font-size:0.68rem;color:var(--muted)">oldest first</span>
-        <span id="timeline-count" style="font-size:0.68rem;color:var(--muted);margin-left:auto"></span>
-      </div>
-      <div class="timeline" id="timeline">
-        <div class="empty-state">Select a network, enter src/dst, and click ▶ Run Audit</div>
-      </div>
-    </div>
-
-    <!-- Summary bar -->
+    <!-- Summary bar — shown after run completes, sits above run bar -->
     <div id="summary-bar" style="display:none">
       <div class="summary-bar">
         <div class="sum-item">
@@ -732,6 +710,28 @@ HTML = r"""<!DOCTYPE html>
         <div class="sum-item" style="justify-content:center">
           <button class="btn-secondary btn-sm" id="export-btn" onclick="exportCsv()" disabled>↓ Export CSV</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Run bar -->
+    <div style="display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;flex-wrap:wrap">
+      <button class="btn-primary" id="run-btn" onclick="runHistory()">▶ Run Audit</button>
+      <button class="btn-secondary" id="stop-btn" onclick="stopAudit()" disabled>■ Stop</button>
+      <div style="flex:1;min-width:160px">
+        <div id="progress-label" class="progress-label" style="margin-bottom:4px">Ready.</div>
+        <div class="progress-wrap" style="margin:0"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
+      </div>
+    </div>
+
+    <!-- Timeline -->
+    <div class="card" style="padding:12px 16px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        <span style="font-size:0.68rem;font-weight:700;color:var(--accent);letter-spacing:0.12em">── TIMELINE</span>
+        <span style="font-size:0.68rem;color:var(--muted)">oldest first</span>
+        <span id="timeline-count" style="font-size:0.68rem;color:var(--muted);margin-left:auto"></span>
+      </div>
+      <div class="timeline" id="timeline">
+        <div class="empty-state">Select a network, enter src/dst, and click ▶ Run Audit</div>
       </div>
     </div>
 
@@ -1145,14 +1145,28 @@ function appendTimelineRow(row, isFirst, isLast) {
   const pathStr   = analysis.total_paths !== undefined ? `${analysis.total_paths}${hitsBound} total hits` : '';
   const hopStr    = analysis.max_hops ? (analysis.min_hops === analysis.max_hops ? `${analysis.max_hops} hops` : `${analysis.min_hops}–${analysis.max_hops} hops`) : '';
   const fwPathStr = analysis.paths_with_fw ? `${analysis.paths_with_fw} w/ FW` : '';
-  const timedOutBadge = analysis.timed_out ? `<span class="badge badge-warn" style="font-size:0.6rem">timed out</span>` : '';
+  // analysis.timed_out = API returned partial results with timedOut:true (still useful)
+  // row.error with no analysis = socket-level timeout, no results at all
+  const apiTimedOut    = analysis.timed_out && !row.error;
+  const socketTimedOut = row.error && row.error.toLowerCase().includes('timed out');
 
-  // Timeout explanation note
-  const timeoutNote = (row.error && row.error.includes('timed out')) || analysis.timed_out
+  const timedOutBadge = apiTimedOut
+    ? `<span class="badge badge-warn" style="font-size:0.6rem">timedOut: true</span>`
+    : socketTimedOut
+      ? `<span class="badge badge-err" style="font-size:0.6rem">socket timeout</span>`
+      : '';
+
+  // Two distinct timeout notes
+  const timeoutNote = apiTimedOut
     ? `<div style="font-size:0.68rem;color:var(--warn);margin-top:4px">
-        ⚠ The API did not respond within the maxSeconds timeout. This is a socket-level timeout,
-        not a Forward Networks error. Try increasing maxSeconds, or open the API URL directly to test.
-       </div>` : '';
+        API response included <code>timedOut: true</code>. Results shown are what was returned.
+       </div>`
+    : socketTimedOut
+      ? `<div style="font-size:0.68rem;color:var(--error);margin-top:4px">
+          Socket timeout — no response received within maxSeconds + 120s. The Forward API may still be processing.
+          Use the API URL copy button to test this snapshot directly.
+         </div>`
+      : '';
 
   // Expand button ID
   const detailId = `detail-${snap.id}`;
@@ -1278,7 +1292,7 @@ function buildSummary() {
   const noFw    = allRows.filter(r => !r.error && r.analysis && !r.analysis.has_fw).length;
   const changes = allRows.filter(r => ['FW_SET_CHANGED','FW_APPEARED','FW_DISAPPEARED'].includes(r.change)).length;
   const ecmp    = allRows.filter(r => r.change === 'PATH_COUNT_ONLY').length;
-  const errors  = allRows.filter(r => r.error || r.analysis?.timed_out).length;
+  const errors  = allRows.filter(r => r.error || (r.analysis?.timed_out && !r.analysis?.total_paths)).length;
 
   document.getElementById('sum-total').textContent   = total;
   document.getElementById('sum-fw').textContent      = withFw;
