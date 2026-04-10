@@ -184,7 +184,7 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
 
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=max_seconds + 60) as resp:
+        with urllib.request.urlopen(req, timeout=max_seconds + 120) as resp:
             body   = json.loads(resp.read().decode("utf-8"))
             status = resp.status
     except urllib.error.HTTPError as e:
@@ -237,6 +237,8 @@ def extract_fw_fingerprint(paths, normalize_peers):
 def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
                intent, max_candidates, max_results, ip_proto, dst_port, max_seconds):
     """Build the API URL and app search string/URL for display."""
+    from urllib.parse import urlencode
+
     params = {
         "srcIp":         src_ip,
         "dstIp":         dst_ip,
@@ -251,8 +253,7 @@ def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
     if dst_port:
         params["dstPort"] = str(dst_port)
 
-    qs      = "&".join(f"{k}={v}" for k, v in params.items())
-    api_url = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
+    api_url = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{urlencode(params)}"
 
     PROTO_MAP = {"1":"ICMP","6":"TCP","17":"UDP","47":"GRE","50":"ESP","51":"AH","58":"ICMPv6"}
     search = f"f({src_ip})(ipv4_dst.{dst_ip})"
@@ -263,8 +264,7 @@ def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
     search += "m(permit_all)"
 
     app_params = {"networkId": network_id, "snapshotId": snapshot_id, "q": search}
-    app_qs     = "&".join(f"{k}={v}" for k, v in app_params.items())
-    app_url    = f"{base_url.rstrip("/")}/?/search?{app_qs}"
+    app_url    = f"{base_url.rstrip('/')}/?/search?{urlencode(app_params)}"
 
     return api_url, search, app_url
 
@@ -1160,6 +1160,11 @@ function appendTimelineRow(row, isFirst, isLast) {
 
   const div = document.createElement('div');
   div.className = 'tl-row';
+  // Store copy values on the container — avoids inline onclick escaping issues
+  div.dataset.appSearch = row.app_search || '';
+  div.dataset.appUrl    = row.app_url    || '';
+  div.dataset.apiUrl    = row.api_url    || '';
+  div.dataset.rawJson   = row.raw_body ? JSON.stringify(row.raw_body, null, 2) : '';
   div.innerHTML = `
     <div class="tl-gutter ${meta.gutterClass}"></div>
     <div class="tl-body">
@@ -1179,9 +1184,9 @@ function appendTimelineRow(row, isFirst, isLast) {
         ${hopStr  ? `<span>${hopStr}</span>`  : ''}
         ${fwPathStr ? `<span>${fwPathStr}</span>` : ''}
         <span>${elapsed}</span>
-        ${row.app_search ? `<button class="copy-sm" style="margin-left:4px" onclick="copyText(${JSON.stringify(row.app_search||'')}, this)" title="Copy app search string">⎘ Search</button>` : ''}
-        ${row.app_url    ? `<button class="copy-sm" onclick="copyText(${JSON.stringify(row.app_url||'')}, this)" title="Copy app URL">⎘ App URL</button>` : ''}
-        ${row.api_url    ? `<button class="copy-sm" onclick="copyText(${JSON.stringify(row.api_url||'')}, this)" title="Copy API URL">⎘ API URL</button>` : ''}
+        ${row.app_search ? `<button class="copy-sm" style="margin-left:4px" data-copy="app_search" title="Copy app search string">⎘ Search</button>` : ''}
+        ${row.app_url    ? `<button class="copy-sm" data-copy="app_url" title="Copy app URL">⎘ App URL</button>` : ''}
+        ${row.api_url    ? `<button class="copy-sm" data-copy="api_url" title="Copy API URL">⎘ API URL</button>` : ''}
       </div>
 
       <!-- Expandable detail panel — full URLs + JSON -->
@@ -1190,28 +1195,28 @@ function appendTimelineRow(row, isFirst, isLast) {
           <div class="detail-label">APP SEARCH STRING</div>
           <div class="detail-copy-row">
             <div class="detail-box">${esc(row.app_search || '—')}</div>
-            <button class="copy-sm" onclick="copyText(${JSON.stringify(row.app_search||'')}, this)">⎘ Copy</button>
+            <button class="copy-sm" data-copy="app_search">⎘ Copy</button>
           </div>
         </div>
         <div class="detail-section">
           <div class="detail-label">APP URL</div>
           <div class="detail-copy-row">
             <div class="detail-box">${esc(row.app_url || '—')}</div>
-            <button class="copy-sm" onclick="copyText(${JSON.stringify(row.app_url||'')}, this)">⎘ Copy</button>
+            <button class="copy-sm" data-copy="app_url">⎘ Copy</button>
           </div>
         </div>
         <div class="detail-section">
           <div class="detail-label">API URL</div>
           <div class="detail-copy-row">
             <div class="detail-box">${esc(row.api_url || '—')}</div>
-            <button class="copy-sm" onclick="copyText(${JSON.stringify(row.api_url||'')}, this)">⎘ Copy</button>
+            <button class="copy-sm" data-copy="api_url">⎘ Copy</button>
           </div>
         </div>
         ${row.raw_body ? `
         <div class="detail-section">
           <div class="detail-label" style="display:flex;align-items:center;gap:8px">
             API RESPONSE
-            <button class="copy-sm" onclick="copyText(${JSON.stringify(JSON.stringify(row.raw_body, null, 2))}, this)">⎘ Copy JSON</button>
+            <button class="copy-sm" data-copy="raw_json">⎘ Copy JSON</button>
           </div>
           <div class="json-scroll">${syntaxHL(row.raw_body)}</div>
         </div>` : ''}
@@ -1233,6 +1238,28 @@ function copyText(text, btn) {
     setTimeout(() => btn.textContent = orig, 2000);
   });
 }
+
+// Delegated handler for all data-copy buttons — reads value from nearest .tl-row
+document.addEventListener('click', e => {
+  const btn = e.target.closest('[data-copy]');
+  if (!btn) return;
+  const key    = btn.dataset.copy;
+  const tlRow  = btn.closest('.tl-row');
+  if (!tlRow) return;
+  const keyMap = {
+    app_search: tlRow.dataset.appSearch,
+    app_url:    tlRow.dataset.appUrl,
+    api_url:    tlRow.dataset.apiUrl,
+    raw_json:   tlRow.dataset.rawJson,
+  };
+  const text = keyMap[key] || '';
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓';
+    setTimeout(() => btn.textContent = orig, 2000);
+  });
+});
 
 function syntaxHL(obj) {
   let s = JSON.stringify(obj, null, 2);
