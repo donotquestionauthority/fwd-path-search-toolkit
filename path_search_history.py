@@ -1427,6 +1427,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     intent, max_cand, max_results, ip_proto, dst_port, max_sec
                 )
 
+                # Retry once on socket-level errors (timeout, connection reset, etc.)
+                # These are transient — the API runs fine when called individually.
+                if err and body is None:
+                    time.sleep(3)
+                    status2, body2, elapsed_ms2, err2 = run_path_search(
+                        base_url, net_id, snap_id, src_ip, dst_ip,
+                        intent, max_cand, max_results, ip_proto, dst_port, max_sec
+                    )
+                    if body2 is not None:
+                        status, body, elapsed_ms, err = status2, body2, elapsed_ms + elapsed_ms2, err2
+                    else:
+                        err = f"{err} (retried: {err2})"
+
                 if err and body is None:
                     result = {
                         'error': err, 'elapsed_ms': elapsed_ms, 'analysis': None,
