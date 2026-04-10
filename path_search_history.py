@@ -23,9 +23,25 @@ import time
 import importlib.util
 from datetime import datetime, timezone, timedelta
 
-PORT = 8767
+PORT        = 8767
 CREDENTIALS   = {}
 NETWORKS_DATA = []
+CONFIG_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "path_search_config.json")
+
+
+def read_config():
+    if not os.path.exists(CONFIG_FILE):
+        return {"savedSearches": []}
+    try:
+        with open(CONFIG_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return {"savedSearches": []}
+
+
+def write_config(data):
+    with open(CONFIG_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 # Device types the API considers "firewall" across all platforms
 FIREWALL_TYPES = frozenset([
@@ -132,13 +148,13 @@ def list_processed_snapshots(base_url, network_id, days_back):
                 "date":        ts.strftime("%Y-%m-%d"),
             })
 
-    # Newest first
-    result.sort(key=lambda x: x["ts"], reverse=True)
+    # Oldest first — baseline at top, each row compared to the one above
+    result.sort(key=lambda x: x["ts"], reverse=False)
     return result, None
 
 
 def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
-                    intent, max_candidates, ip_proto, dst_port, max_seconds=60):
+                    intent, max_candidates, ip_proto, dst_port, max_seconds=30):
     """
     Run a path search for a specific snapshot.
     Returns (status, parsed_body_dict_or_None, elapsed_ms, error_or_None)
@@ -168,7 +184,7 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
 
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=max_seconds + 10) as resp:
+        with urllib.request.urlopen(req, timeout=max_seconds + 60) as resp:
             body   = json.loads(resp.read().decode("utf-8"))
             status = resp.status
     except urllib.error.HTTPError as e:
@@ -218,6 +234,41 @@ def extract_fw_fingerprint(paths, normalize_peers):
     return frozenset(fw_names)
 
 
+def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
+               intent, max_candidates, ip_proto, dst_port, max_seconds):
+    """Build the API URL and app search string/URL for display."""
+    params = {
+        "srcIp":         src_ip,
+        "dstIp":         dst_ip,
+        "intent":        intent,
+        "maxCandidates": str(max_candidates),
+        "maxResults":    str(max_candidates),
+        "maxSeconds":    str(max_seconds),
+        "snapshotId":    snapshot_id,
+    }
+    if ip_proto:
+        params["ipProto"] = str(ip_proto)
+    if dst_port:
+        params["dstPort"] = str(dst_port)
+
+    qs      = "&".join(f"{k}={v}" for k, v in params.items())
+    api_url = f"{base_url.rstrip("/")}/api/networks/{network_id}/paths?{qs}"
+
+    PROTO_MAP = {"1":"ICMP","6":"TCP","17":"UDP","47":"GRE","50":"ESP","51":"AH","58":"ICMPv6"}
+    search = f"f({src_ip})(ipv4_dst.{dst_ip})"
+    if ip_proto:
+        search += f"(ip_proto.{PROTO_MAP.get(str(ip_proto), str(ip_proto))})"
+    if dst_port:
+        search += f"(tp_dst.{dst_port})"
+    search += "m(permit_all)"
+
+    app_params = {"networkId": network_id, "snapshotId": snapshot_id, "q": search}
+    app_qs     = "&".join(f"{k}={v}" for k, v in app_params.items())
+    app_url    = f"{base_url.rstrip("/")}/?/search?{app_qs}"
+
+    return api_url, search, app_url
+
+
 def analyze_snapshot_result(body, normalize_peers):
     """
     Parse a PathSearchResponse and return a summary dict.
@@ -235,11 +286,14 @@ def analyze_snapshot_result(body, normalize_peers):
         if any(h.get("deviceType") in FIREWALL_TYPES for h in p.get("hops", []))
     )
 
-    # Per-path forwarding outcomes
     outcomes = {}
     for p in paths:
         o = p.get("forwardingOutcome", "UNKNOWN")
         outcomes[o] = outcomes.get(o, 0) + 1
+
+    hop_counts = [len(p.get("hops", [])) for p in paths]
+    max_hops   = max(hop_counts) if hop_counts else 0
+    min_hops   = min(hop_counts) if hop_counts else 0
 
     return {
         "fw_fingerprint":  sorted(fingerprint),
@@ -249,6 +303,8 @@ def analyze_snapshot_result(body, normalize_peers):
         "timed_out":       timed_out,
         "query_url":       query_url,
         "outcomes":        outcomes,
+        "max_hops":        max_hops,
+        "min_hops":        min_hops,
     }
 
 
@@ -441,6 +497,56 @@ HTML = r"""<!DOCTYPE html>
   .spinner { display:inline-block; animation:spin 1s linear infinite; }
   @keyframes spin { to { transform:rotate(360deg); } }
   .hint { font-size:0.66rem; color:var(--muted); }
+
+  /* ── Saved searches ── */
+  .ss-row { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .ss-row select { flex:1; min-width:120px; }
+  .save-status { font-size:0.7rem; color:var(--success); opacity:0; transition:opacity 0.2s; }
+  .save-status.visible { opacity:1; }
+
+  /* ── Expand panel ── */
+  .tl-expand-btn {
+    font-family:inherit; font-size:0.65rem; font-weight:700;
+    background:var(--bg); color:var(--muted);
+    border:1px solid var(--border); border-radius:var(--radius);
+    padding:2px 8px; cursor:pointer; margin-left:auto;
+    transition:border-color 0.15s, color 0.15s;
+  }
+  .tl-expand-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .tl-detail {
+    display:none; margin-top:8px; padding-top:8px;
+    border-top:1px solid var(--border);
+  }
+  .tl-detail.open { display:block; }
+  .detail-section { margin-bottom:8px; }
+  .detail-label { font-size:0.62rem; font-weight:700; color:var(--muted); letter-spacing:0.1em; margin-bottom:3px; }
+  .detail-box {
+    background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
+    padding:6px 8px; font-size:0.7rem; color:var(--accent2);
+    word-break:break-all; white-space:pre-wrap; line-height:1.5;
+    cursor:text; user-select:all;
+  }
+  .detail-copy-row { display:flex; align-items:flex-start; gap:6px; }
+  .detail-copy-row .detail-box { flex:1; }
+  .copy-sm {
+    font-family:inherit; font-size:0.62rem; font-weight:700;
+    background:var(--surface); color:var(--muted);
+    border:1px solid var(--border); border-radius:var(--radius);
+    padding:3px 7px; cursor:pointer; flex-shrink:0; margin-top:0;
+    transition:border-color 0.15s;
+  }
+  .copy-sm:hover { border-color:var(--accent); color:var(--accent); }
+  .json-scroll {
+    max-height:300px; overflow-y:auto;
+    background:var(--bg); border:1px solid var(--border); border-radius:var(--radius);
+    padding:8px; font-size:0.68rem; line-height:1.6;
+    white-space:pre-wrap; word-break:break-all;
+  }
+  .j-key  { color:#79c0ff; }
+  .j-str  { color:#a5d6a7; }
+  .j-num  { color:#f0c27f; }
+  .j-bool { color:var(--accent); }
+  .j-null { color:var(--muted); }
 </style>
 </head>
 <body>
@@ -448,7 +554,7 @@ HTML = r"""<!DOCTYPE html>
 <header>
   <span class="logo">⬡</span>
   <span class="title">PATH SEARCH HISTORY</span>
-  <span class="sub">Snapshot Audit — Firewall Visibility Over Time</span>
+  <span class="sub">Snapshot Audit — Path Search Results Over Time</span>
 </header>
 <div class="divider"></div>
 
@@ -456,6 +562,20 @@ HTML = r"""<!DOCTYPE html>
 
   <!-- ── LEFT ── -->
   <div class="left">
+
+    <div class="card">
+      <div class="card-title">── SAVED SEARCHES</div>
+      <div class="ss-row">
+        <select id="saved-select" onchange="loadSavedSearch()" autocomplete="off" data-lpignore="true">
+          <option value="">— select a saved search —</option>
+        </select>
+      </div>
+      <div class="ss-row" style="margin-top:8px">
+        <button class="btn-secondary btn-sm" onclick="saveCurrentSearch()">Save as...</button>
+        <button class="btn-secondary btn-sm" onclick="deleteSavedSearch()">Delete</button>
+      </div>
+      <div id="save-status" class="save-status" style="margin-top:6px"></div>
+    </div>
 
     <div class="card">
       <div class="card-title">── NETWORK</div>
@@ -512,7 +632,7 @@ HTML = r"""<!DOCTYPE html>
       </div>
       <div class="row">
         <label>maxSeconds</label>
-        <input type="number" id="max-sec" value="60" min="1" max="300">
+        <input type="number" id="max-sec" value="30" min="1" max="300">
         <span class="hint">per snapshot</span>
       </div>
     </div>
@@ -592,7 +712,7 @@ HTML = r"""<!DOCTYPE html>
     <div class="card" style="padding:12px 16px">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
         <span style="font-size:0.68rem;font-weight:700;color:var(--accent);letter-spacing:0.12em">── TIMELINE</span>
-        <span style="font-size:0.68rem;color:var(--muted)">newest first</span>
+        <span style="font-size:0.68rem;color:var(--muted)">oldest first</span>
         <span id="timeline-count" style="font-size:0.68rem;color:var(--muted);margin-left:auto"></span>
       </div>
       <div class="timeline" id="timeline">
@@ -610,6 +730,8 @@ let stopped = false;
 let allRows = [];   // { snapshot, analysis, change, elapsed_ms }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
+let savedSearches = [];
+
 async function boot() {
   try {
     const r    = await fetch('/networks-data');
@@ -617,7 +739,112 @@ async function boot() {
     discoveredNetworks   = Array.isArray(data) ? data : (data.networks || []);
     credentialedNetworks = new Set(discoveredNetworks.map(n => n.id));
   } catch(e) { discoveredNetworks = []; }
-  setTimeout(() => renderNetworkDropdown(), 300);
+  try {
+    const r = await fetch('/config');
+    const c = await r.json();
+    savedSearches = c.savedSearches || [];
+  } catch(e) { savedSearches = []; }
+  setTimeout(() => {
+    renderNetworkDropdown();
+    renderSavedSearchDropdown();
+  }, 300);
+}
+
+// ── Saved Searches ────────────────────────────────────────────────────────────
+function renderSavedSearchDropdown() {
+  const sel = document.getElementById('saved-select');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">— select a saved search —</option>';
+  savedSearches.forEach((s, i) => {
+    const opt = document.createElement('option');
+    opt.value = i; opt.textContent = s.name;
+    sel.appendChild(opt);
+  });
+  if (cur !== '') sel.value = cur;
+}
+
+function loadSavedSearch() {
+  const idx = document.getElementById('saved-select').value;
+  if (idx === '') return;
+  const p = savedSearches[parseInt(idx)].params;
+
+  document.getElementById('base-url').value  = p.base || 'https://fwd.app';
+  document.getElementById('src-ip').value    = p.srcIp    || '';
+  document.getElementById('dst-ip').value    = p.dstIp    || '';
+  document.getElementById('ip-proto').value  = p.ipProto  || '';
+  document.getElementById('dst-port').value  = p.dstPort  || '';
+  document.getElementById('max-cand').value  = p.maxCandidates || 5000;
+  document.getElementById('max-sec').value   = p.maxSeconds    || 30;
+
+  const intentSel = document.getElementById('intent');
+  intentSel.value = p.intent || 'PREFER_DELIVERED';
+
+  // Restore network selection by network ID
+  if (p.networkId) {
+    const idx = discoveredNetworks.findIndex(n => n.id === p.networkId);
+    if (idx >= 0) {
+      document.getElementById('network-select').value = idx;
+      onNetworkSelect();
+    }
+  }
+}
+
+function currentParams() {
+  const netIdx  = document.getElementById('network-select').value;
+  const networkId = netIdx !== '' ? discoveredNetworks[parseInt(netIdx)].id : '';
+  return {
+    base:          document.getElementById('base-url').value.trim(),
+    networkId,
+    srcIp:         document.getElementById('src-ip').value.trim(),
+    dstIp:         document.getElementById('dst-ip').value.trim(),
+    ipProto:       document.getElementById('ip-proto').value.trim(),
+    dstPort:       document.getElementById('dst-port').value.trim(),
+    intent:        document.getElementById('intent').value,
+    maxCandidates: document.getElementById('max-cand').value,
+    maxSeconds:    document.getElementById('max-sec').value,
+  };
+}
+
+async function saveCurrentSearch() {
+  const name = prompt('Name this saved search:');
+  if (!name || !name.trim()) return;
+  const trimmed = name.trim();
+  const existing = savedSearches.findIndex(s => s.name === trimmed);
+  const entry = { name: trimmed, params: currentParams() };
+  if (existing >= 0) {
+    if (!confirm(`"${trimmed}" already exists. Overwrite?`)) return;
+    savedSearches[existing] = entry;
+  } else {
+    savedSearches.push(entry);
+  }
+  await fetch('/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ savedSearches })
+  });
+  renderSavedSearchDropdown();
+  const newIdx = savedSearches.findIndex(s => s.name === trimmed);
+  document.getElementById('saved-select').value = newIdx;
+  flashStatus('save-status', `✓ Saved "${trimmed}"`);
+}
+
+async function deleteSavedSearch() {
+  const idx = document.getElementById('saved-select').value;
+  if (idx === '') return;
+  const name = savedSearches[parseInt(idx)].name;
+  if (!confirm(`Delete "${name}"?`)) return;
+  savedSearches.splice(parseInt(idx), 1);
+  await fetch('/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ savedSearches })
+  });
+  renderSavedSearchDropdown();
+}
+
+function flashStatus(id, msg) {
+  const el = document.getElementById(id);
+  el.textContent = msg;
+  el.classList.add('visible');
+  setTimeout(() => { el.classList.remove('visible'); el.textContent = ''; }, 3000);
 }
 
 function renderNetworkDropdown() {
@@ -660,7 +887,7 @@ async function runHistory() {
   const dstPort       = document.getElementById('dst-port').value.trim() || null;
   const intent        = document.getElementById('intent').value;
   const maxCand       = parseInt(document.getElementById('max-cand').value) || 5000;
-  const maxSec        = parseInt(document.getElementById('max-sec').value) || 60;
+  const maxSec        = parseInt(document.getElementById('max-sec').value) || 30;
   const daysBack      = parseInt(document.getElementById('days-back').value) || 30;
   const normPeers     = document.getElementById('normalize-peers').checked;
 
@@ -703,14 +930,20 @@ async function runHistory() {
   document.getElementById('timeline-count').textContent = `${snapshots.length} snapshots`;
   document.getElementById('timeline').innerHTML = '';
 
-  // Step 2: run path search for each snapshot
-  let prevAnalysis = null;
+  // Step 2: run path search for each snapshot (list is oldest-first)
+  // BASELINE is assigned only to the very first snapshot (oldest in window).
+  // For change detection we compare each snapshot to the previous one in
+  // iteration order (i.e. the older snapshot above it).
+  // We yield to the browser event loop between calls to prevent page timeout.
 
   for (let i = 0; i < snapshots.length; i++) {
     if (stopped) break;
     const snap = snapshots[i];
+    const isFirst = (i === 0);
     setProgress(i, snapshots.length,
       `[${i+1}/${snapshots.length}] Querying snapshot: ${snap.label}`);
+    // Yield to browser event loop to prevent "page unresponsive" timeout
+    await new Promise(r => setTimeout(r, 0));
 
     const resp = await fetch('/run-search-snap', {
       method: 'POST',
@@ -726,13 +959,24 @@ async function runHistory() {
     const row = await resp.json();
     row.snapshot = snap;
 
-    // Change detection vs previous snapshot (previous = older = next in list
-    // since we go newest-first; so compare to allRows[allRows.length-1])
-    const prev = allRows.length > 0 ? allRows[allRows.length - 1].analysis : null;
-    row.change = row.error ? 'error' : detectChange(prev, row.analysis);
+    // Find the most recent non-error analysis to compare against
+    let prevAnalysis = null;
+    for (let j = allRows.length - 1; j >= 0; j--) {
+      if (allRows[j].analysis && !allRows[j].error) {
+        prevAnalysis = allRows[j].analysis;
+        break;
+      }
+    }
+
+    // BASELINE only on the first (oldest) snapshot
+    if (isFirst && !row.error) {
+      row.change = 'BASELINE';
+    } else {
+      row.change = row.error ? 'error' : detectChange(prevAnalysis, row.analysis);
+    }
 
     allRows.push(row);
-    appendTimelineRow(row, i === 0);
+    appendTimelineRow(row, i === 0, isFirst);
   }
 
   setProgress(snapshots.length, snapshots.length,
@@ -779,31 +1023,34 @@ const CHANGE_META = {
   NO_RESULTS:      { gutterClass:'no-results',       badge:'<span class="badge badge-muted">— no results</span>' },
 };
 
-function appendTimelineRow(row, isFirst) {
+function appendTimelineRow(row, isFirst, isLast) {
   const tl       = document.getElementById('timeline');
   const snap     = row.snapshot;
   const analysis = row.analysis || {};
   const change   = row.change || 'error';
   const meta     = CHANGE_META[change] || CHANGE_META['error'];
+  const rowId    = `row-${snap.id}`;
 
-  // Build FW device tags with diff annotations
-  // Compare to the row just before this one in the array (i.e. the newer snapshot)
-  const prevRow  = allRows.length > 1 ? allRows[allRows.length - 2] : null;
-  const prevFp   = new Set((prevRow && prevRow.analysis) ? prevRow.analysis.fw_fingerprint : []);
-  const currFp   = new Set(analysis.fw_fingerprint || []);
+  // FW device tags — compare to the nearest previous non-error row
+  let prevFp = new Set();
+  for (let j = allRows.length - 2; j >= 0; j--) {
+    if (allRows[j].analysis && !allRows[j].error) {
+      prevFp = new Set(allRows[j].analysis.fw_fingerprint || []);
+      break;
+    }
+  }
+  const currFp = new Set(analysis.fw_fingerprint || []);
 
   let fwHtml = '';
   if (currFp.size > 0) {
     fwHtml = '<div class="tl-fw">';
     currFp.forEach(name => {
       const isNew = prevFp.size > 0 && !prevFp.has(name);
-      fwHtml += `<span class="fw-tag${isNew ? ' new' : ''}" title="${isNew ? 'New device (not in previous snapshot)' : ''}">${esc(name)}</span>`;
+      fwHtml += `<span class="fw-tag${isNew?' new':''}">${esc(name)}</span>`;
     });
-    // Show devices that disappeared vs previous
     prevFp.forEach(name => {
-      if (!currFp.has(name)) {
-        fwHtml += `<span class="fw-tag removed" title="Removed vs previous snapshot">${esc(name)}</span>`;
-      }
+      if (!currFp.has(name))
+        fwHtml += `<span class="fw-tag removed">${esc(name)}</span>`;
     });
     fwHtml += '</div>';
   } else if (!row.error) {
@@ -812,26 +1059,33 @@ function appendTimelineRow(row, isFirst) {
 
   // Change note
   let changeNote = '';
-  if (change === 'FW_SET_CHANGED') {
+  if (change === 'FW_SET_CHANGED')
     changeNote = `<div class="tl-change-note change-fw-set">⚠ Firewall set differs from previous snapshot</div>`;
-  } else if (change === 'FW_APPEARED') {
+  else if (change === 'FW_APPEARED')
     changeNote = `<div class="tl-change-note change-appeared">↑ Firewall hops newly visible in this snapshot</div>`;
-  } else if (change === 'FW_DISAPPEARED') {
+  else if (change === 'FW_DISAPPEARED')
     changeNote = `<div class="tl-change-note change-gone">↓ Firewall hops missing — were visible in previous snapshot</div>`;
-  } else if (change === 'PATH_COUNT_ONLY') {
-    changeNote = `<div class="tl-change-note change-count">Path count changed (${analysis.total_paths || 0} paths) — same firewall set, likely ECMP variation</div>`;
-  } else if (change === 'BASELINE') {
-    changeNote = `<div class="tl-change-note change-baseline">Baseline snapshot (oldest in window)</div>`;
-  }
+  else if (change === 'PATH_COUNT_ONLY')
+    changeNote = `<div class="tl-change-note change-count">Path count changed (${analysis.total_paths||0} paths) — same device set, likely ECMP variation</div>`;
+  else if (change === 'BASELINE')
+    changeNote = `<div class="tl-change-note change-baseline">Oldest snapshot in window — used as baseline for comparison</div>`;
 
   // Meta line
-  const elapsed    = row.elapsed_ms < 1000 ? `${row.elapsed_ms}ms` : `${(row.elapsed_ms/1000).toFixed(1)}s`;
-  const pathStr    = analysis.total_paths !== undefined ? `${analysis.total_paths} paths` : '';
-  const fwPathStr  = analysis.paths_with_fw ? `${analysis.paths_with_fw} w/ FW` : '';
+  const elapsed   = row.elapsed_ms < 1000 ? `${row.elapsed_ms}ms` : `${(row.elapsed_ms/1000).toFixed(1)}s`;
+  const pathStr   = analysis.total_paths !== undefined ? `${analysis.total_paths} path${analysis.total_paths!==1?'s':''}` : '';
+  const hopStr    = analysis.max_hops ? (analysis.min_hops === analysis.max_hops ? `${analysis.max_hops} hops` : `${analysis.min_hops}–${analysis.max_hops} hops`) : '';
+  const fwPathStr = analysis.paths_with_fw ? `${analysis.paths_with_fw} w/ FW` : '';
   const timedOutBadge = analysis.timed_out ? `<span class="badge badge-warn" style="font-size:0.6rem">timed out</span>` : '';
-  const queryUrlLink = analysis.query_url
-    ? `<a href="${esc(analysis.query_url)}" target="_blank" title="Open in Forward Networks App">🔗 open in app</a>`
-    : '';
+
+  // Timeout explanation note
+  const timeoutNote = (row.error && row.error.includes('timed out')) || analysis.timed_out
+    ? `<div style="font-size:0.68rem;color:var(--warn);margin-top:4px">
+        ⚠ The API did not respond within the maxSeconds timeout. This is a socket-level timeout,
+        not a Forward Networks error. Try increasing maxSeconds, or open the API URL directly to test.
+       </div>` : '';
+
+  // Expand button ID
+  const detailId = `detail-${snap.id}`;
 
   const div = document.createElement('div');
   div.className = 'tl-row';
@@ -843,17 +1097,78 @@ function appendTimelineRow(row, isFirst) {
         ${meta.badge}
         ${timedOutBadge}
         <span class="tl-snap-id">ID: ${esc(snap.id)}</span>
+        <button class="tl-expand-btn" onclick="toggleDetail('${detailId}', this)">▶ detail</button>
       </div>
-      ${row.error ? `<div style="font-size:0.7rem;color:var(--error)">Error: ${esc(row.error)}</div>` : ''}
+      ${row.error ? `<div style="font-size:0.7rem;color:var(--error);margin-top:4px">Error: ${esc(row.error)}</div>` : ''}
+      ${timeoutNote}
       ${!row.error ? fwHtml : ''}
       ${changeNote}
       <div class="tl-meta">
-        <span>${pathStr}${fwPathStr ? ' · ' + fwPathStr : ''}</span>
+        ${pathStr ? `<span>${pathStr}</span>` : ''}
+        ${hopStr  ? `<span>${hopStr}</span>`  : ''}
+        ${fwPathStr ? `<span>${fwPathStr}</span>` : ''}
         <span>${elapsed}</span>
-        ${queryUrlLink}
+      </div>
+
+      <!-- Expandable detail panel -->
+      <div class="tl-detail" id="${detailId}">
+        <div class="detail-section">
+          <div class="detail-label">APP SEARCH STRING</div>
+          <div class="detail-copy-row">
+            <div class="detail-box">${esc(row.app_search || '—')}</div>
+            <button class="copy-sm" onclick="copyText(${JSON.stringify(row.app_search||'')}, this)">⎘ Copy</button>
+          </div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">APP URL</div>
+          <div class="detail-copy-row">
+            <div class="detail-box">${esc(row.app_url || '—')}</div>
+            <button class="copy-sm" onclick="copyText(${JSON.stringify(row.app_url||'')}, this)">⎘ Copy</button>
+          </div>
+        </div>
+        <div class="detail-section">
+          <div class="detail-label">API URL</div>
+          <div class="detail-copy-row">
+            <div class="detail-box">${esc(row.api_url || '—')}</div>
+            <button class="copy-sm" onclick="copyText(${JSON.stringify(row.api_url||'')}, this)">⎘ Copy</button>
+          </div>
+        </div>
+        ${row.raw_body ? `
+        <div class="detail-section">
+          <div class="detail-label" style="display:flex;align-items:center;gap:8px">
+            API RESPONSE
+            <button class="copy-sm" onclick="copyText(${JSON.stringify(JSON.stringify(row.raw_body, null, 2))}, this)">⎘ Copy JSON</button>
+          </div>
+          <div class="json-scroll">${syntaxHL(row.raw_body)}</div>
+        </div>` : ''}
       </div>
     </div>`;
   tl.appendChild(div);
+}
+
+function toggleDetail(id, btn) {
+  const el = document.getElementById(id);
+  const open = el.classList.toggle('open');
+  btn.textContent = open ? '▼ detail' : '▶ detail';
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    const orig = btn.textContent;
+    btn.textContent = '✓';
+    setTimeout(() => btn.textContent = orig, 2000);
+  });
+}
+
+function syntaxHL(obj) {
+  let s = JSON.stringify(obj, null, 2);
+  s = s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return s.replace(/("(\u[a-zA-Z0-9]{4}|\[^u]|[^\"])*"(\s*:)?|(true|false|null)|-?\d+(?:\.\d*)?(?:[eE][+-]?\d+)?)/g, m => {
+    if (/^"/.test(m)) return /:$/.test(m) ? `<span class="j-key">${m}</span>` : `<span class="j-str">${m}</span>`;
+    if (/true|false/.test(m)) return `<span class="j-bool">${m}</span>`;
+    if (/null/.test(m)) return `<span class="j-null">${m}</span>`;
+    return `<span class="j-num">${m}</span>`;
+  });
 }
 
 // ── Summary bar ───────────────────────────────────────────────────────────────
@@ -920,6 +1235,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == '/networks-data':
             body = json.dumps(NETWORKS_DATA).encode('utf-8')
             self._respond(200, 'application/json', body)
+        elif self.path == '/config':
+            body = json.dumps(read_config()).encode('utf-8')
+            self._respond(200, 'application/json', body)
         else:
             self._respond(200, 'text/html; charset=utf-8', HTML.encode('utf-8'))
 
@@ -927,7 +1245,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get('Content-Length', 0))
         raw    = self.rfile.read(length)
 
-        if self.path == '/list-snapshots':
+        if self.path == '/config':
+            try:
+                data = json.loads(raw)
+                write_config(data)
+                self._respond(200, 'application/json', b'{"ok":true}')
+            except Exception:
+                self._respond(400, 'application/json', b'{"ok":false}')
+
+        elif self.path == '/list-snapshots':
             try:
                 req      = json.loads(raw)
                 base_url = req['baseUrl']
@@ -950,31 +1276,47 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 net_id        = req['networkId']
                 snap_id       = req['snapshotId']
                 norm_peers    = req.get('normalizePeers', False)
+                src_ip        = req['srcIp']
+                dst_ip        = req['dstIp']
+                intent        = req.get('intent', 'PREFER_DELIVERED')
+                max_cand      = req.get('maxCandidates', 5000)
+                ip_proto      = req.get('ipProto')
+                dst_port      = req.get('dstPort')
+                max_sec       = req.get('maxSeconds', 30)
+
+                api_url, app_search, app_url = build_urls(
+                    base_url, net_id, snap_id, src_ip, dst_ip,
+                    intent, max_cand, ip_proto, dst_port, max_sec
+                )
 
                 status, body, elapsed_ms, err = run_path_search(
-                    base_url, net_id, snap_id,
-                    req['srcIp'], req['dstIp'],
-                    req.get('intent', 'PREFER_DELIVERED'),
-                    req.get('maxCandidates', 5000),
-                    req.get('ipProto'),
-                    req.get('dstPort'),
-                    req.get('maxSeconds', 60)
+                    base_url, net_id, snap_id, src_ip, dst_ip,
+                    intent, max_cand, ip_proto, dst_port, max_sec
                 )
 
                 if err and body is None:
-                    result = {'error': err, 'elapsed_ms': elapsed_ms, 'analysis': None}
+                    result = {
+                        'error': err, 'elapsed_ms': elapsed_ms, 'analysis': None,
+                        'api_url': api_url, 'app_search': app_search, 'app_url': app_url,
+                        'raw_body': None
+                    }
                 else:
                     analysis = analyze_snapshot_result(body, norm_peers)
                     result   = {
                         'status':     status,
                         'elapsed_ms': elapsed_ms,
                         'analysis':   analysis,
-                        'error':      err if status and status >= 400 else None
+                        'error':      err if status and status >= 400 else None,
+                        'api_url':    api_url,
+                        'app_search': app_search,
+                        'app_url':    app_url,
+                        'raw_body':   body,
                     }
                 self._respond(200, 'application/json', json.dumps(result).encode('utf-8'))
             except Exception as e:
                 self._respond(200, 'application/json',
-                    json.dumps({'error': str(e), 'elapsed_ms': 0, 'analysis': None}).encode('utf-8'))
+                    json.dumps({'error': str(e), 'elapsed_ms': 0, 'analysis': None,
+                                'api_url': '', 'app_search': '', 'app_url': '', 'raw_body': None}).encode('utf-8'))
 
         else:
             self._respond(404, 'application/json', b'{"ok":false}')
