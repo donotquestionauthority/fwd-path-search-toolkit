@@ -678,7 +678,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="btn-row" style="margin-top:10px">
         <button class="btn-primary" id="run-btn" onclick="runHistory()">▶ Run Audit</button>
         <button class="btn-secondary" id="stop-btn" onclick="stopAudit()" disabled>■ Stop</button>
-        <button class="btn-secondary btn-sm" id="export-btn" onclick="exportCsv()" disabled>↓ CSV</button>
+
       </div>
     </div>
 
@@ -686,6 +686,18 @@ HTML = r"""<!DOCTYPE html>
 
   <!-- ── RIGHT ── -->
   <div class="right">
+
+    <!-- Timeline -->
+    <div class="card" style="padding:12px 16px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        <span style="font-size:0.68rem;font-weight:700;color:var(--accent);letter-spacing:0.12em">── TIMELINE</span>
+        <span style="font-size:0.68rem;color:var(--muted)">oldest first</span>
+        <span id="timeline-count" style="font-size:0.68rem;color:var(--muted);margin-left:auto"></span>
+      </div>
+      <div class="timeline" id="timeline">
+        <div class="empty-state">Select a network, enter src/dst, and click ▶ Run Audit</div>
+      </div>
+    </div>
 
     <!-- Summary bar -->
     <div id="summary-bar" style="display:none">
@@ -717,18 +729,10 @@ HTML = r"""<!DOCTYPE html>
           <span class="sum-label">ERRORS / TIMEOUTS</span>
           <span class="sum-val warn" id="sum-err">—</span>
         </div>
-      </div>
-    </div>
-
-    <!-- Timeline -->
-    <div class="card" style="padding:12px 16px">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
-        <span style="font-size:0.68rem;font-weight:700;color:var(--accent);letter-spacing:0.12em">── TIMELINE</span>
-        <span style="font-size:0.68rem;color:var(--muted)">oldest first</span>
-        <span id="timeline-count" style="font-size:0.68rem;color:var(--muted);margin-left:auto"></span>
-      </div>
-      <div class="timeline" id="timeline">
-        <div class="empty-state">Select a network, enter src/dst, and click ▶ Run Audit</div>
+        <div class="sep-v"></div>
+        <div class="sum-item" style="justify-content:center">
+          <button class="btn-secondary btn-sm" id="export-btn" onclick="exportCsv()" disabled>↓ Export CSV</button>
+        </div>
       </div>
     </div>
 
@@ -946,53 +950,104 @@ async function runHistory() {
   document.getElementById('timeline').innerHTML = '';
 
   // Step 2: run path search for each snapshot (list is oldest-first)
-  // BASELINE is assigned only to the very first snapshot (oldest in window).
-  // For change detection we compare each snapshot to the previous one in
-  // iteration order (i.e. the older snapshot above it).
-  // We yield to the browser event loop between calls to prevent page timeout.
+  // Uses a concurrency pool — up to CONCURRENCY requests in-flight at once.
+  // Results are rendered in snapshot order regardless of completion order:
+  // we buffer completed results and flush as many consecutive ones as possible
+  // from the front each time any result arrives.
 
-  for (let i = 0; i < snapshots.length; i++) {
-    if (stopped) break;
-    const snap = snapshots[i];
+  const CONCURRENCY = 5;
+  const total       = snapshots.length;
+  const results     = new Array(total).fill(null);  // indexed buffer
+  let nextToLaunch  = 0;   // next snapshot index to start
+  let nextToRender  = 0;   // next snapshot index to render
+  let inFlight      = 0;
+  let doneCount     = 0;
+
+  function buildRow(i, row) {
+    const snap    = snapshots[i];
     const isFirst = (i === 0);
-    setProgress(i, snapshots.length,
-      `[${i+1}/${snapshots.length}] Querying snapshot: ${snap.label}`);
-    // Yield to browser event loop to prevent "page unresponsive" timeout
-    await new Promise(r => setTimeout(r, 0));
+    row.snapshot  = snap;
 
-    const resp = await fetch('/run-search-snap', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        baseUrl, networkId, snapshotId: snap.id,
-        srcIp, dstIp, intent, maxCandidates: maxCand, maxResults,
-        ipProto: ipProto ? parseInt(ipProto) : null,
-        dstPort: dstPort ? parseInt(dstPort) : null,
-        maxSeconds: maxSec, normalizePeers: normPeers
-      })
-    });
-    const row = await resp.json();
-    row.snapshot = snap;
-
-    // Find the most recent non-error analysis to compare against
+    // For change detection, look back through already-rendered rows
     let prevAnalysis = null;
-    for (let j = allRows.length - 1; j >= 0; j--) {
-      if (allRows[j].analysis && !allRows[j].error) {
-        prevAnalysis = allRows[j].analysis;
+    for (let j = i - 1; j >= 0; j--) {
+      if (results[j] && results[j].analysis && !results[j].error) {
+        prevAnalysis = results[j].analysis;
         break;
       }
     }
 
-    // BASELINE only on the first (oldest) snapshot
     if (isFirst && !row.error) {
       row.change = 'BASELINE';
     } else {
       row.change = row.error ? 'error' : detectChange(prevAnalysis, row.analysis);
     }
-
-    allRows.push(row);
-    appendTimelineRow(row, i === 0, isFirst);
+    return row;
   }
+
+  function flushRendered() {
+    // Render as many consecutive completed rows as possible from nextToRender
+    while (nextToRender < total && results[nextToRender] !== null) {
+      const row = results[nextToRender];
+      allRows.push(row);
+      appendTimelineRow(row, nextToRender === 0, nextToRender === 0);
+      nextToRender++;
+    }
+  }
+
+  async function launchOne(i) {
+    if (stopped) { inFlight--; doneCount++; flushRendered(); return; }
+    const snap = snapshots[i];
+    setProgress(doneCount, total,
+      `[${doneCount}/${total} done · ${inFlight} in flight] ${snap.label}`);
+
+    try {
+      const resp = await fetch('/run-search-snap', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          baseUrl, networkId, snapshotId: snap.id,
+          srcIp, dstIp, intent, maxCandidates: maxCand, maxResults,
+          ipProto: ipProto ? parseInt(ipProto) : null,
+          dstPort: dstPort ? parseInt(dstPort) : null,
+          maxSeconds: maxSec, normalizePeers: normPeers
+        })
+      });
+      const row = await resp.json();
+      results[i] = buildRow(i, row);
+    } catch(e) {
+      results[i] = buildRow(i, { error: String(e), elapsed_ms: 0, analysis: null,
+                                  api_url: '', app_search: '', app_url: '', raw_body: null });
+    }
+
+    inFlight--;
+    doneCount++;
+    setProgress(doneCount, total,
+      `[${doneCount}/${total} done · ${inFlight} in flight]`);
+    flushRendered();
+
+    // Start the next one if any remain
+    if (nextToLaunch < total && !stopped) {
+      inFlight++;
+      const next = nextToLaunch++;
+      launchOne(next);
+    }
+  }
+
+  // Seed the pool
+  await new Promise(r => setTimeout(r, 0)); // yield before starting
+  while (nextToLaunch < total && inFlight < CONCURRENCY) {
+    inFlight++;
+    const i = nextToLaunch++;
+    launchOne(i);
+  }
+
+  // Wait for all in-flight requests to complete
+  await new Promise(resolve => {
+    const check = setInterval(() => {
+      if (doneCount >= total) { clearInterval(check); resolve(); }
+    }, 100);
+  });
 
   setProgress(snapshots.length, snapshots.length,
     stopped ? 'Stopped.' : `✓ Complete — ${allRows.length} snapshots audited`);
