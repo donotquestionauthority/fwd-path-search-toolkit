@@ -671,21 +671,20 @@ HTML = r"""<!DOCTYPE html>
       </div>
     </div>
 
-    <div class="card">
-      <div class="card-title">── RUN</div>
-      <div id="progress-label" class="progress-label" style="margin-bottom:6px">Ready.</div>
-      <div class="progress-wrap"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
-      <div class="btn-row" style="margin-top:10px">
-        <button class="btn-primary" id="run-btn" onclick="runHistory()">▶ Run Audit</button>
-        <button class="btn-secondary" id="stop-btn" onclick="stopAudit()" disabled>■ Stop</button>
-
-      </div>
-    </div>
-
   </div><!-- /left -->
 
   <!-- ── RIGHT ── -->
   <div class="right">
+
+    <!-- Run bar -->
+    <div style="display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:10px 16px;flex-wrap:wrap">
+      <button class="btn-primary" id="run-btn" onclick="runHistory()">▶ Run Audit</button>
+      <button class="btn-secondary" id="stop-btn" onclick="stopAudit()" disabled>■ Stop</button>
+      <div style="flex:1;min-width:160px">
+        <div id="progress-label" class="progress-label" style="margin-bottom:4px">Ready.</div>
+        <div class="progress-wrap" style="margin:0"><div class="progress-fill" id="progress-bar" style="width:0%"></div></div>
+      </div>
+    </div>
 
     <!-- Timeline -->
     <div class="card" style="padding:12px 16px">
