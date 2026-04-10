@@ -1,6 +1,6 @@
 # Forward Networks — Path Search Toolkit
 
-**By Robert Tavoularis** · Customer Success Engineer · Forward Networks
+**By Robert Tavoularis** · Senior Customer Success Engineer · Forward Networks
 
 A collection of local browser-based tools for building, comparing, and auditing
 Forward Networks Path Search API queries — no external dependencies, pure Python stdlib.
@@ -32,11 +32,16 @@ read/write the same `path_search_config.json` file for saved searches.
 
 ### 1. Create API Credentials
 
-In the Forward Networks UI: **Settings → API Access → Create API Key**
+In the Forward Networks UI: **Settings → Personal → Account → API Tokens → Generate API Token**
 
-Each key gives you an **Access Key** and a **Secret Key**.
+Each token gives you an **Access Key** and a **Secret Key**.
 
-### 2. Set Environment Variables
+### 2. Find your Network ID
+
+Navigate to your network in the Forward Networks UI. The network ID is visible in the
+URL: `https://fwd.app/?/search?networkId=123456` — the numeric value is your network ID.
+
+### 3. Set Environment Variables
 
 Add one variable per network to your shell profile (`~/.zshrc`, `~/.bashrc`, etc.):
 
@@ -55,10 +60,7 @@ Reload your shell:
 source ~/.zshrc
 ```
 
-**Finding your Network ID:** In the Forward Networks UI, the network ID is visible
-in the URL when you navigate to a network: `.../networks/123456/...`
-
-### 3. Run a Tool
+### 4. Run a Tool
 
 ```bash
 python3 path_search_builder.py
@@ -80,11 +82,11 @@ The core tool. Build and execute Forward Networks
 
 **Features:**
 - Dynamic network and snapshot discovery via the API — no manual configuration
-- Build `GET /api/networks/{networkId}/paths` URLs with full parameter control
-- Run queries directly against the API with live JSON response and syntax highlighting
+- Build and execute `GET /api/networks/{networkId}/paths` queries with the most commonly used parameters
+- Live JSON response with syntax highlighting
 - Navigate multi-path results one at a time
 - Filter results by `forwardingOutcome`, `securityOutcome`, device type, device name, and display name
-- **Firewall Summary panel** — detects asymmetric routing by comparing firewall sets across all returned paths, flags when different paths traverse different firewalls
+- **Firewall Summary panel** — compares firewall sets across all returned paths to validate result consistency
 - Generate the equivalent Forward Networks App search string and deep-link URL for in-app follow-up
 - Save and reload named searches
 
@@ -101,14 +103,6 @@ The core tool. Build and execute Forward Networks
 | `maxResults` | How many paths to return |
 | `maxSeconds` | Query timeout |
 | `includeNetworkFunctions` | Include virtualized network functions in the path |
-
-**Tip — surfacing firewalls:**
-Path Search returns the *shortest/most efficient* path by default. Firewalls are
-often discovered only when `maxCandidates` is large enough that the search
-explores paths that traverse them. If you're not seeing expected firewalls,
-increase `maxCandidates` (try 5000, 10000) and use the Firewall Summary panel
-to compare consistency across returned paths.
-
 ---
 
 ### Path Search Comparison (`path_search_compare.py`)
@@ -248,7 +242,7 @@ increase `maxCandidates`. Start with `5000`, try `10000` if still not appearing.
 ## Author
 
 **Robert Tavoularis**
-Customer Success Engineer — Forward Networks
+Senior Customer Success Engineer — Forward Networks
 [github.com/donotquestionauthority](https://github.com/donotquestionauthority)
 
 Forward Networks builds network digital twins and network intelligence platforms.
