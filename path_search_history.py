@@ -154,7 +154,7 @@ def list_processed_snapshots(base_url, network_id, days_back):
 
 
 def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
-                    intent, max_candidates, ip_proto, dst_port, max_seconds=30):
+                    intent, max_candidates, max_results, ip_proto, dst_port, max_seconds=30):
     """
     Run a path search for a specific snapshot.
     Returns (status, parsed_body_dict_or_None, elapsed_ms, error_or_None)
@@ -164,7 +164,7 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
         "dstIp":         dst_ip,
         "intent":        intent,
         "maxCandidates": str(max_candidates),
-        "maxResults":    str(max_candidates),
+        "maxResults":    str(max_results),
         "maxSeconds":    str(max_seconds),
         "snapshotId":    snapshot_id,
     }
@@ -235,14 +235,14 @@ def extract_fw_fingerprint(paths, normalize_peers):
 
 
 def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
-               intent, max_candidates, ip_proto, dst_port, max_seconds):
+               intent, max_candidates, max_results, ip_proto, dst_port, max_seconds):
     """Build the API URL and app search string/URL for display."""
     params = {
         "srcIp":         src_ip,
         "dstIp":         dst_ip,
         "intent":        intent,
         "maxCandidates": str(max_candidates),
-        "maxResults":    str(max_candidates),
+        "maxResults":    str(max_results),
         "maxSeconds":    str(max_seconds),
         "snapshotId":    snapshot_id,
     }
@@ -252,7 +252,7 @@ def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
         params["dstPort"] = str(dst_port)
 
     qs      = "&".join(f"{k}={v}" for k, v in params.items())
-    api_url = f"{base_url.rstrip("/")}/api/networks/{network_id}/paths?{qs}"
+    api_url = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
 
     PROTO_MAP = {"1":"ICMP","6":"TCP","17":"UDP","47":"GRE","50":"ESP","51":"AH","58":"ICMPv6"}
     search = f"f({src_ip})(ipv4_dst.{dst_ip})"
@@ -295,10 +295,17 @@ def analyze_snapshot_result(body, normalize_peers):
     max_hops   = max(hop_counts) if hop_counts else 0
     min_hops   = min(hop_counts) if hop_counts else 0
 
+    # Use totalHits for path count — accurate even when maxResults=1
+    total_hits_data = (body.get("info") or {}).get("totalHits") or {}
+    total_hits      = total_hits_data.get("value", len(paths))
+    total_hits_type = total_hits_data.get("type", "EXACT")
+
     return {
         "fw_fingerprint":  sorted(fingerprint),
         "has_fw":          len(fingerprint) > 0,
-        "total_paths":     len(paths),
+        "total_paths":     total_hits,
+        "total_hits_type": total_hits_type,
+        "paths_returned":  len(paths),
         "paths_with_fw":   paths_with_fw,
         "timed_out":       timed_out,
         "query_url":       query_url,
@@ -631,6 +638,11 @@ HTML = r"""<!DOCTYPE html>
         <span class="hint">1–10000</span>
       </div>
       <div class="row">
+        <label>maxResults</label>
+        <input type="number" id="max-results" value="1" min="1" max="10000">
+        <span class="hint">paths returned (totalHits always shown)</span>
+      </div>
+      <div class="row">
         <label>maxSeconds</label>
         <input type="number" id="max-sec" value="30" min="1" max="300">
         <span class="hint">per snapshot</span>
@@ -773,8 +785,9 @@ function loadSavedSearch() {
   document.getElementById('dst-ip').value    = p.dstIp    || '';
   document.getElementById('ip-proto').value  = p.ipProto  || '';
   document.getElementById('dst-port').value  = p.dstPort  || '';
-  document.getElementById('max-cand').value  = p.maxCandidates || 5000;
-  document.getElementById('max-sec').value   = p.maxSeconds    || 30;
+  document.getElementById('max-cand').value     = p.maxCandidates || 5000;
+  document.getElementById('max-results').value  = p.maxResults    || 1;
+  document.getElementById('max-sec').value      = p.maxSeconds    || 30;
 
   const intentSel = document.getElementById('intent');
   intentSel.value = p.intent || 'PREFER_DELIVERED';
@@ -801,6 +814,7 @@ function currentParams() {
     dstPort:       document.getElementById('dst-port').value.trim(),
     intent:        document.getElementById('intent').value,
     maxCandidates: document.getElementById('max-cand').value,
+    maxResults:    document.getElementById('max-results').value,
     maxSeconds:    document.getElementById('max-sec').value,
   };
 }
@@ -887,6 +901,7 @@ async function runHistory() {
   const dstPort       = document.getElementById('dst-port').value.trim() || null;
   const intent        = document.getElementById('intent').value;
   const maxCand       = parseInt(document.getElementById('max-cand').value) || 5000;
+  const maxResults    = parseInt(document.getElementById('max-results').value) || 1;
   const maxSec        = parseInt(document.getElementById('max-sec').value) || 30;
   const daysBack      = parseInt(document.getElementById('days-back').value) || 30;
   const normPeers     = document.getElementById('normalize-peers').checked;
@@ -950,7 +965,7 @@ async function runHistory() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         baseUrl, networkId, snapshotId: snap.id,
-        srcIp, dstIp, intent, maxCandidates: maxCand,
+        srcIp, dstIp, intent, maxCandidates: maxCand, maxResults,
         ipProto: ipProto ? parseInt(ipProto) : null,
         dstPort: dstPort ? parseInt(dstPort) : null,
         maxSeconds: maxSec, normalizePeers: normPeers
@@ -1072,7 +1087,8 @@ function appendTimelineRow(row, isFirst, isLast) {
 
   // Meta line
   const elapsed   = row.elapsed_ms < 1000 ? `${row.elapsed_ms}ms` : `${(row.elapsed_ms/1000).toFixed(1)}s`;
-  const pathStr   = analysis.total_paths !== undefined ? `${analysis.total_paths} path${analysis.total_paths!==1?'s':''}` : '';
+  const hitsBound = analysis.total_hits_type === 'LOWER_BOUND' ? '+' : '';
+  const pathStr   = analysis.total_paths !== undefined ? `${analysis.total_paths}${hitsBound} total hits` : '';
   const hopStr    = analysis.max_hops ? (analysis.min_hops === analysis.max_hops ? `${analysis.max_hops} hops` : `${analysis.min_hops}–${analysis.max_hops} hops`) : '';
   const fwPathStr = analysis.paths_with_fw ? `${analysis.paths_with_fw} w/ FW` : '';
   const timedOutBadge = analysis.timed_out ? `<span class="badge badge-warn" style="font-size:0.6rem">timed out</span>` : '';
@@ -1194,20 +1210,38 @@ function buildSummary() {
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 function exportCsv() {
-  const hdrs = ['snapshot_id','processed_at','change','has_fw','fw_devices',
-                'total_paths','paths_with_fw','timed_out','elapsed_ms','error','query_url'];
+  const hdrs = [
+    'snapshot_id',
+    'processed_at',
+    'change',
+    'fw_devices',
+    'total_hits',
+    'total_hits_type',
+    'paths_with_fw',
+    'hops_min',
+    'hops_max',
+    'timed_out',
+    'elapsed_ms',
+    'error',
+    'api_url'
+  ];
   const rows = [hdrs.join(',')];
   allRows.forEach(r => {
     const a = r.analysis || {};
     rows.push([
-      csv(r.snapshot.id), csv(r.snapshot.ts), r.change,
-      a.has_fw ? 'yes' : 'no',
+      csv(r.snapshot.id),
+      csv(r.snapshot.ts),
+      r.change || '',
       csv((a.fw_fingerprint || []).join('; ')),
-      a.total_paths ?? '', a.paths_with_fw ?? '',
+      a.total_paths   ?? '',
+      a.total_hits_type || '',
+      a.paths_with_fw ?? '',
+      a.min_hops      ?? '',
+      a.max_hops      ?? '',
       a.timed_out ? 'yes' : 'no',
-      r.elapsed_ms ?? '',
-      csv(r.error || ''),
-      csv(a.query_url || '')
+      r.elapsed_ms    ?? '',
+      csv(r.error     || ''),
+      csv(r.api_url   || '')
     ].join(','));
   });
   const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
@@ -1283,18 +1317,19 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 dst_ip        = req['dstIp']
                 intent        = req.get('intent', 'PREFER_DELIVERED')
                 max_cand      = req.get('maxCandidates', 5000)
+                max_results   = req.get('maxResults', 1)
                 ip_proto      = req.get('ipProto')
                 dst_port      = req.get('dstPort')
                 max_sec       = req.get('maxSeconds', 30)
 
                 api_url, app_search, app_url = build_urls(
                     base_url, net_id, snap_id, src_ip, dst_ip,
-                    intent, max_cand, ip_proto, dst_port, max_sec
+                    intent, max_cand, max_results, ip_proto, dst_port, max_sec
                 )
 
                 status, body, elapsed_ms, err = run_path_search(
                     base_url, net_id, snap_id, src_ip, dst_ip,
-                    intent, max_cand, ip_proto, dst_port, max_sec
+                    intent, max_cand, max_results, ip_proto, dst_port, max_sec
                 )
 
                 if err and body is None:
