@@ -434,7 +434,7 @@ HTML = r"""<!DOCTYPE html>
 
   /* Left gutter: status color bar */
   .tl-gutter { width:5px; flex-shrink:0; }
-  .tl-gutter.no-change      { background:var(--success); }
+  .tl-gutter.no-change      { background:var(--muted); }
   .tl-gutter.fw-set-changed { background:var(--error); }
   .tl-gutter.fw-appeared    { background:var(--accent); }
   .tl-gutter.fw-disappeared { background:var(--error); }
@@ -1013,7 +1013,7 @@ function detectChange(prev, curr) {
 
 // ── Timeline rendering ────────────────────────────────────────────────────────
 const CHANGE_META = {
-  NO_CHANGE:       { gutterClass:'no-change',      badge:'<span class="badge badge-ok">✓ no change</span>' },
+  NO_CHANGE:       { gutterClass:'no-change',      badge:'<span class="badge badge-muted">— no change</span>' },
   FW_SET_CHANGED:  { gutterClass:'fw-set-changed', badge:'<span class="badge badge-err">⚠ FW set changed</span>' },
   FW_APPEARED:     { gutterClass:'fw-appeared',    badge:'<span class="badge badge-info">↑ FW appeared</span>' },
   FW_DISAPPEARED:  { gutterClass:'fw-disappeared', badge:'<span class="badge badge-err">↓ FW disappeared</span>' },
@@ -1108,9 +1108,12 @@ function appendTimelineRow(row, isFirst, isLast) {
         ${hopStr  ? `<span>${hopStr}</span>`  : ''}
         ${fwPathStr ? `<span>${fwPathStr}</span>` : ''}
         <span>${elapsed}</span>
+        ${row.app_search ? `<button class="copy-sm" style="margin-left:4px" onclick="copyText(${JSON.stringify(row.app_search||'')}, this)" title="Copy app search string">⎘ Search</button>` : ''}
+        ${row.app_url    ? `<button class="copy-sm" onclick="copyText(${JSON.stringify(row.app_url||'')}, this)" title="Copy app URL">⎘ App URL</button>` : ''}
+        ${row.api_url    ? `<button class="copy-sm" onclick="copyText(${JSON.stringify(row.api_url||'')}, this)" title="Copy API URL">⎘ API URL</button>` : ''}
       </div>
 
-      <!-- Expandable detail panel -->
+      <!-- Expandable detail panel — full URLs + JSON -->
       <div class="tl-detail" id="${detailId}">
         <div class="detail-section">
           <div class="detail-label">APP SEARCH STRING</div>
