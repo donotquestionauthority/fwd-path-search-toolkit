@@ -839,14 +839,22 @@ let activeIdx     = null;
 let cache         = {};   // deviceName -> analysis
 
 async function boot() {
-  const [nd, cfg, fd] = await Promise.all([
-    fetch('/networks-data').then(r=>r.json()),
-    fetch('/config').then(r=>r.json()),
-    fetch('/filters').then(r=>r.json()),
-  ]);
-  networksData  = nd;
-  savedSearches = cfg.savedSearches || [];
-  filterDefs    = fd;
+  try {
+    const r = await fetch('/networks-data');
+    const data = await r.json();
+    networksData = Array.isArray(data) ? data : (data.networks || []);
+  } catch(e) { networksData = []; }
+
+  try {
+    const r = await fetch('/config');
+    const c = await r.json();
+    savedSearches = c.savedSearches || [];
+  } catch(e) { savedSearches = []; }
+
+  try {
+    const r = await fetch('/filters');
+    filterDefs = await r.json();
+  } catch(e) { filterDefs = {}; }
 
   // Delay dropdown population to let password managers (Dashlane etc)
   // finish injecting before we write options — otherwise they wipe them.

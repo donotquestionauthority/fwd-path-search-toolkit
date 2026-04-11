@@ -12,6 +12,7 @@ import json
 import os
 import urllib.request
 import urllib.error
+import urllib.parse
 import base64
 import sys
 import importlib.util
@@ -1746,8 +1747,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
                 # Extract maxSeconds from the URL query string so the socket
                 # timeout respects whatever the user configured in the UI.
-                import urllib.parse as _urlparse
-                _qs         = _urlparse.urlparse(url).query
+                _qs         = urllib.parse.urlparse(url).query
                 _params     = dict(p.split('=') for p in _qs.split('&') if '=' in p)
                 _max_sec    = int(_params.get('maxSeconds', 30))
                 _sock_timeout = _max_sec + 120
