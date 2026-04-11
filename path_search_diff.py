@@ -525,18 +525,18 @@ def analyze_device(base_url, network_id, device_name,
 # HTML
 # ─────────────────────────────────────────────────────────────────────────────
 
-HTML = """<!DOCTYPE html>
+HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Forward Networks \xb7 Path Search Diff</title>
+<title>Forward Networks &middot; Path Search Diff</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap');
   *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
   :root{
     --bg:#0d1117;--surface:#161b22;--surface2:#1c2128;--border:#30363d;
-    --accent:#00b4d8;--text:#e6edf3;--muted:#8b949e;
+    --accent:#00b4d8;--accent2:#90e0ef;--text:#e6edf3;--muted:#8b949e;
     --success:#3fb950;--error:#f85149;--warn:#d29922;--info:#58a6ff;
     --radius:6px;
   }
@@ -544,28 +544,19 @@ HTML = """<!DOCTYPE html>
   body{background:var(--bg);color:var(--text);
     font-family:'JetBrains Mono','Courier New',monospace;
     height:100vh;overflow:hidden;display:flex;flex-direction:column}
-
-  /* topbar */
   .topbar{flex-shrink:0;padding:14px 24px 0}
   header{display:flex;align-items:baseline;gap:10px;margin-bottom:6px}
   .logo{color:var(--accent);font-size:1.3rem;font-weight:700}
   .title{font-size:1.15rem;font-weight:700;letter-spacing:.05em}
   .subtitle{color:var(--muted);font-size:0.8rem}
   .divider{height:1px;background:var(--accent);margin:10px 0 0}
-
-  /* layout */
   .main{flex:1;display:flex;overflow:hidden}
-
-  /* left pane */
   .left-pane{width:300px;flex-shrink:0;display:flex;flex-direction:column;border-right:1px solid var(--border);overflow:hidden}
   .left-header{padding:10px 14px 8px;border-bottom:1px solid var(--border);flex-shrink:0}
   .snap-compare{font-size:0.68rem;line-height:1.8}
-  .snap-working{color:var(--success)}
-  .snap-broken{color:var(--error)}
+  .snap-working{color:var(--success)}.snap-broken{color:var(--error)}
   .snap-label{color:var(--muted);font-size:0.63rem}
   .hop-list{flex:1;overflow-y:auto;padding:4px 0}
-
-  /* hop row */
   .hop-row{display:flex;align-items:center;gap:7px;padding:7px 14px;cursor:pointer;
     border-left:3px solid transparent;transition:background .1s}
   .hop-row:hover{background:var(--surface2)}
@@ -575,23 +566,17 @@ HTML = """<!DOCTYPE html>
   .hop-name{flex:1;font-size:0.71rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .hop-type{font-size:0.58rem;color:var(--muted);white-space:nowrap}
   .presence{width:7px;height:7px;border-radius:50%;flex-shrink:0}
-  .presence.present{background:var(--success)}
-  .presence.absent{background:var(--error)}
+  .presence.present{background:var(--success)}.presence.absent{background:var(--error)}
   .presence.synth{background:transparent}
   .sev{font-size:0.58rem;font-weight:700;padding:1px 5px;border-radius:3px;flex-shrink:0;min-width:20px;text-align:center}
-  .sev-error{background:var(--error);color:#000}
-  .sev-warn{background:var(--warn);color:#000}
+  .sev-error{background:var(--error);color:#000}.sev-warn{background:var(--warn);color:#000}
   .sev-info{background:var(--info);color:#000}
   .sev-clean{background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
   .sev-pending{background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
-
-  /* right pane */
   .right-pane{flex:1;display:flex;flex-direction:column;overflow:hidden}
   .right-header{padding:10px 20px 8px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;gap:10px}
   .right-title{font-size:0.7rem;font-weight:700;color:var(--accent);letter-spacing:.1em}
   .right-content{flex:1;overflow-y:auto;padding:14px 20px 24px}
-
-  /* config panel */
   .config-panel{max-width:680px}
   .config-panel h2{font-size:0.82rem;color:var(--accent);margin-bottom:14px;letter-spacing:.1em}
   .field-group{margin-bottom:12px}
@@ -604,8 +589,7 @@ HTML = """<!DOCTYPE html>
   .row4{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px}
   .btn{background:var(--accent);color:var(--bg);border:none;padding:7px 18px;border-radius:var(--radius);
     font-family:inherit;font-size:0.75rem;font-weight:700;cursor:pointer;transition:opacity .15s}
-  .btn:hover{opacity:.85}
-  .btn:disabled{opacity:.4;cursor:not-allowed}
+  .btn:hover{opacity:.85}.btn:disabled{opacity:.4;cursor:not-allowed}
   .btn-sm{background:var(--surface2);color:var(--text);border:1px solid var(--border);padding:3px 9px;
     border-radius:var(--radius);font-family:inherit;font-size:0.63rem;cursor:pointer}
   .btn-sm:hover{border-color:var(--accent);color:var(--accent)}
@@ -617,71 +601,49 @@ HTML = """<!DOCTYPE html>
   .filter-inline label{font-size:0.65rem;color:var(--muted);white-space:nowrap}
   .filter-inline select{background:var(--surface);border:1px solid var(--border);
     color:var(--text);padding:4px 8px;border-radius:var(--radius);font-family:inherit;font-size:0.7rem}
-  .filter-inline .fdesc{font-size:0.6rem;color:var(--muted)}
-
-  /* analysis sections */
+  .fdesc{font-size:0.6rem;color:var(--muted)}
   .section{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);margin-bottom:10px;overflow:hidden}
   .sec-hdr{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;border-bottom:1px solid transparent;user-select:none}
-  .sec-hdr:hover{background:var(--surface2)}
-  .sec-hdr.open{border-bottom-color:var(--border)}
+  .sec-hdr:hover{background:var(--surface2)}.sec-hdr.open{border-bottom-color:var(--border)}
   .sec-title{font-size:0.68rem;font-weight:700;letter-spacing:.07em;flex:1}
   .sec-badge{font-size:0.6rem;padding:1px 6px;border-radius:3px}
-  .badge-changed{background:var(--warn);color:#000}
-  .badge-ok{background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
+  .badge-changed{background:var(--warn);color:#000}.badge-ok{background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
   .badge-error{background:var(--error);color:#fff}
-  .sec-body{padding:12px;display:none}
-  .sec-body.open{display:block}
+  .sec-body{padding:12px;display:none}.sec-body.open{display:block}
   .chev{font-size:0.58rem;color:var(--muted);width:10px}
-
-  /* metadata table */
   .meta-tbl{width:100%;border-collapse:collapse;font-size:0.69rem}
   .meta-tbl th{text-align:left;padding:3px 8px;color:var(--muted);font-weight:400;border-bottom:1px solid var(--border)}
   .meta-tbl td{padding:3px 8px;vertical-align:top}
   .meta-tbl tr.changed td{background:rgba(210,153,34,.07)}
   .meta-tbl tr.changed td:first-child{color:var(--warn);font-weight:700}
-  .val-null{color:var(--muted);font-style:italic}
-  .val-chg{color:var(--warn)}
-
-  /* topology table */
+  .val-null{color:var(--muted);font-style:italic}.val-chg{color:var(--warn)}
   .topo-tbl{width:100%;border-collapse:collapse;font-size:0.67rem}
   .topo-tbl th{text-align:left;padding:3px 8px;color:var(--muted);font-weight:400;border-bottom:1px solid var(--border)}
   .topo-tbl td{padding:3px 8px;font-family:'JetBrains Mono',monospace}
-  .link-lost{color:var(--error)}
-  .link-new{color:var(--success)}
-  .link-unchanged{color:var(--muted)}
+  .link-lost{color:var(--error)}.link-new{color:var(--success)}.link-unchanged{color:var(--muted)}
   .link-stat{font-size:0.58rem;font-weight:700;white-space:nowrap}
-
-  /* file diff */
   .file-list{display:flex;flex-direction:column;gap:5px}
   .file-item{background:var(--surface2);border:1px solid var(--border);border-radius:4px;overflow:hidden}
   .file-hdr{display:flex;align-items:center;gap:7px;padding:5px 10px;cursor:pointer;user-select:none}
   .file-hdr:hover{background:rgba(255,255,255,.03)}
   .file-name{flex:1;font-size:0.69rem}
   .file-badge{font-size:0.57rem;padding:1px 5px;border-radius:3px;white-space:nowrap}
-  .fb-changed{background:var(--warn);color:#000}
-  .fb-unchanged{background:var(--surface);color:var(--muted);border:1px solid var(--border)}
-  .fb-only-w{background:var(--error);color:#fff}
-  .fb-only-b{background:var(--success);color:#000}
+  .fb-changed{background:var(--warn);color:#000}.fb-unchanged{background:var(--surface);color:var(--muted);border:1px solid var(--border)}
+  .fb-only-w{background:var(--error);color:#fff}.fb-only-b{background:var(--success);color:#000}
   .fb-error{background:var(--error);color:#fff}
-  .file-body{display:none;border-top:1px solid var(--border)}
-  .file-body.open{display:block}
+  .file-body{display:none;border-top:1px solid var(--border)}.file-body.open{display:block}
   .diff-meta{padding:4px 10px;font-size:0.61rem;color:var(--muted);border-bottom:1px solid var(--border);display:flex;gap:12px}
   .diff-view{font-size:0.64rem;line-height:1.5;overflow-x:auto}
   .diff-line{padding:0 10px;white-space:pre;font-family:'JetBrains Mono',monospace}
-  .diff-add{background:rgba(63,185,80,.10);color:var(--success)}
-  .diff-del{background:rgba(248,81,73,.10);color:var(--error)}
-  .diff-hdr{background:rgba(0,180,216,.08);color:var(--accent)}
-  .diff-ctx{color:var(--muted)}
+  .diff-add{background:rgba(63,185,80,.10);color:var(--success)}.diff-del{background:rgba(248,81,73,.10);color:var(--error)}
+  .diff-hdr{background:rgba(0,180,216,.08);color:var(--accent)}.diff-ctx{color:var(--muted)}
   .supp-note{font-size:0.61rem;color:var(--muted);padding:3px 10px;font-style:italic}
   .diff-toggle{padding:4px 10px}
-
-  /* states */
   .placeholder{display:flex;flex-direction:column;align-items:center;
     justify-content:center;height:160px;gap:8px;color:var(--muted);font-size:0.78rem;text-align:center}
   .placeholder .big{font-size:2rem}
   .loading-msg{color:var(--muted);font-size:0.73rem;padding:20px}
   .err-msg{color:var(--error);font-size:0.73rem;padding:20px}
-
   ::-webkit-scrollbar{width:6px;height:6px}
   ::-webkit-scrollbar-track{background:transparent}
   ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
@@ -691,7 +653,7 @@ HTML = """<!DOCTYPE html>
 
 <div class="topbar">
   <header>
-    <span class="logo">\u2b61</span>
+    <span class="logo">&#x2b61;</span>
     <span class="title">FORWARD NETWORKS</span>
     <span class="subtitle">Path Search Diff</span>
   </header>
@@ -699,8 +661,6 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div class="main">
-
-  <!-- LEFT PANE -->
   <div class="left-pane">
     <div class="left-header">
       <div class="snap-compare" id="snap-labels">
@@ -708,11 +668,10 @@ HTML = """<!DOCTYPE html>
       </div>
     </div>
     <div class="hop-list" id="hop-list">
-      <div class="placeholder"><span class="big">\u2191</span><span>Configure and run</span></div>
+      <div class="placeholder"><span class="big">&#x2191;</span><span>Configure and run</span></div>
     </div>
   </div>
 
-  <!-- RIGHT PANE -->
   <div class="right-pane">
     <div class="right-header">
       <span class="right-title" id="right-title">CONFIGURATION</span>
@@ -726,21 +685,20 @@ HTML = """<!DOCTYPE html>
     </div>
     <div class="right-content" id="right-content">
 
-      <!-- Config panel -->
       <div id="cfg-panel" class="config-panel">
         <h2>SEARCH PARAMETERS</h2>
 
         <div class="saved-row">
           <label>SAVED SEARCHES</label>
           <select id="saved-sel" autocomplete="off" data-form-type="other" data-lpignore="true" onchange="loadSaved()">
-            <option value="">— select a saved search —</option>
+            <option value="">&#x2014; select a saved search &#x2014;</option>
           </select>
         </div>
 
         <div class="field-group row2">
           <div><label>NETWORK</label>
             <select id="sel-net" autocomplete="off" data-form-type="other" data-lpignore="true" onchange="onNetChange()">
-              <option value="">Loading...</option>
+              <option value="">&#x2014; select network &#x2014;</option>
             </select>
           </div>
           <div><label>INTENT</label>
@@ -769,10 +727,10 @@ HTML = """<!DOCTYPE html>
 
         <div class="field-group row2">
           <div><label>SOURCE IP</label>
-            <input id="inp-src" type="text" placeholder="10.0.0.1" autocomplete="off" data-form-type="other" data-lpignore="true">
+            <input id="inp-src" type="text" placeholder="10.0.0.1" autocomplete="off" data-lpignore="true">
           </div>
           <div><label>DESTINATION IP</label>
-            <input id="inp-dst" type="text" placeholder="10.0.0.2" autocomplete="off" data-form-type="other" data-lpignore="true">
+            <input id="inp-dst" type="text" placeholder="10.0.0.2" autocomplete="off" data-lpignore="true">
           </div>
         </div>
 
@@ -786,61 +744,59 @@ HTML = """<!DOCTYPE html>
             </select>
           </div>
           <div><label>DST PORT</label>
-            <input id="inp-port" type="text" placeholder="443" autocomplete="off" data-form-type="other" data-lpignore="true">
+            <input id="inp-port" type="text" placeholder="443" autocomplete="off" data-lpignore="true">
           </div>
           <div><label>MAX CANDIDATES</label>
-            <input id="inp-maxcand" type="text" value="5000" autocomplete="off" data-form-type="other" data-lpignore="true">
+            <input id="inp-maxcand" type="text" value="5000" autocomplete="off" data-lpignore="true">
           </div>
           <div><label>MAX SECONDS</label>
-            <input id="inp-maxsec" type="text" value="30" autocomplete="off" data-form-type="other" data-lpignore="true">
+            <input id="inp-maxsec" type="text" value="30" autocomplete="off" data-lpignore="true">
           </div>
         </div>
 
         <div class="field-group row2">
           <div><label>PATHS TO ANALYZE (unique device union)</label>
-            <input id="inp-maxpaths" type="text" value="10" autocomplete="off" data-form-type="other" data-lpignore="true">
+            <input id="inp-maxpaths" type="text" value="10" autocomplete="off" data-lpignore="true">
           </div>
-          <div style="display:flex;flex-direction:column;justify-content:flex-end">
-            <div class="filter-inline" style="margin-bottom:0">
+          <div>
+            <div class="filter-inline" style="margin-bottom:0;margin-top:18px">
               <label>NOISE FILTER</label>
-              <select id="cfg-filter-sel" onchange="syncFilter('cfg')"
-                autocomplete="off" data-form-type="other" data-lpignore="true">
-              </select>
+              <select id="cfg-filter-sel" onchange="syncFilter('cfg')" autocomplete="off" data-form-type="other" data-lpignore="true"></select>
               <span id="filter-desc" class="fdesc"></span>
             </div>
           </div>
         </div>
 
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px">
-          <button class="btn" id="run-btn" onclick="runDiff()">\u25b6 RUN DIFF</button>
-          <button class="btn-sm" onclick="saveSearch()">\u229e Save Search</button>
-          <button class="btn-sm" onclick="clearAll()">\u2715 Clear</button>
+          <button class="btn" id="run-btn" onclick="runDiff()">&#x25b6; RUN DIFF</button>
+          <button class="btn-sm" onclick="saveSearch()">&#x229e; Save Search</button>
+          <button class="btn-sm" onclick="clearAll()">&#x2715; Clear</button>
           <span id="run-status" style="font-size:0.68rem;color:var(--muted)"></span>
         </div>
       </div>
 
-      <!-- Device panel -->
       <div id="dev-panel" style="display:none"></div>
 
     </div>
   </div>
-
 </div>
 
 <script>
 'use strict';
 
+// ── State ─────────────────────────────────────────────────────────────────────
 let networksData  = [];
 let savedSearches = [];
 let filterDefs    = {};
 let currentFilter = 'default';
 let runResults    = null;
 let activeIdx     = null;
-let cache         = {};   // deviceName -> analysis
+let cache         = {};
 
+// ── Boot ──────────────────────────────────────────────────────────────────────
 async function boot() {
   try {
-    const r = await fetch('/networks-data');
+    const r    = await fetch('/networks-data');
     const data = await r.json();
     networksData = Array.isArray(data) ? data : (data.networks || []);
   } catch(e) { networksData = []; }
@@ -856,8 +812,6 @@ async function boot() {
     filterDefs = await r.json();
   } catch(e) { filterDefs = {}; }
 
-  // Delay dropdown population to let password managers (Dashlane etc)
-  // finish injecting before we write options — otherwise they wipe them.
   setTimeout(() => {
     buildNetSel();
     buildSavedSel();
@@ -866,47 +820,72 @@ async function boot() {
   }, 300);
 }
 
+// ── Network / snapshot dropdowns ──────────────────────────────────────────────
 function buildNetSel() {
   const sel = document.getElementById('sel-net');
-  sel.innerHTML = '<option value="">— select network —</option>';
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">\u2014 select network \u2014</option>';
   networksData.forEach(n => {
     const o = document.createElement('option');
-    o.value = n.id; o.textContent = n.name || n.id;
+    o.value = n.id;
+    o.textContent = n.name || n.id;
     sel.appendChild(o);
   });
+  if (cur) sel.value = cur;
 }
 
 function buildSavedSel() {
   const sel = document.getElementById('saved-sel');
-  sel.innerHTML = '<option value="">— select a saved search —</option>';
-  savedSearches.forEach((s,i) => {
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">\u2014 select a saved search \u2014</option>';
+  savedSearches.forEach((s, i) => {
     const o = document.createElement('option');
-    o.value = i; o.textContent = s.name || (s.srcIp+' \u2192 '+s.dstIp);
+    o.value = i;
+    o.textContent = s.name || (s.srcIp + ' \u2192 ' + s.dstIp);
     sel.appendChild(o);
   });
+  if (cur !== '') sel.value = cur;
 }
 
 function buildFilterSels() {
-  ['hdr-filter-sel','cfg-filter-sel'].forEach(id => {
+  ['hdr-filter-sel', 'cfg-filter-sel'].forEach(id => {
     const sel = document.getElementById(id);
     if (!sel) return;
+    const cur = sel.value || currentFilter;
     sel.innerHTML = '';
-    Object.entries(filterDefs).forEach(([k,v]) => {
+    Object.keys(filterDefs).forEach(k => {
       const o = document.createElement('option');
       o.value = k; o.textContent = k;
-      if (k === currentFilter) o.selected = true;
+      if (k === cur) o.selected = true;
       sel.appendChild(o);
     });
   });
 }
 
+function onNetChange() {
+  const netId = document.getElementById('sel-net').value;
+  const net   = networksData.find(n => n.id === netId);
+  const snaps = net ? (net.snapshots || []) : [];
+  ['sel-snap-w', 'sel-snap-b'].forEach(id => {
+    const sel = document.getElementById(id);
+    sel.innerHTML = '<option value="">Select network first</option>';
+    snaps.forEach(s => {
+      const o = document.createElement('option');
+      o.value = s.id;
+      o.textContent = s.label || s.id;
+      sel.appendChild(o);
+    });
+  });
+  if (snaps.length >= 1) document.getElementById('sel-snap-w').value = snaps[0].id;
+  if (snaps.length >= 2) document.getElementById('sel-snap-b').value = snaps[1].id;
+}
+
 function syncFilter(src) {
-  const val = document.getElementById(src==='hdr' ? 'hdr-filter-sel' : 'cfg-filter-sel').value;
+  const val = document.getElementById(src === 'hdr' ? 'hdr-filter-sel' : 'cfg-filter-sel').value;
   currentFilter = val;
   document.getElementById('hdr-filter-sel').value = val;
   document.getElementById('cfg-filter-sel').value = val;
   updateFilterDesc();
-  // Re-render active device if cached
   if (activeIdx !== null && runResults) {
     const hop = runResults.hops[activeIdx];
     if (hop && cache[hop.deviceName]) showDevPanel(hop, cache[hop.deviceName]);
@@ -917,43 +896,28 @@ function updateFilterDesc() {
   const el = document.getElementById('filter-desc');
   if (!el) return;
   const f = filterDefs[currentFilter];
-  el.textContent = f ? '\u2014 '+f.description : '';
+  el.textContent = f ? '\u2014 ' + f.description : '';
 }
 
-function onNetChange() {
-  const netId = document.getElementById('sel-net').value;
-  const net   = networksData.find(n=>n.id===netId);
-  const snaps = net ? net.snapshots : [];
-  ['sel-snap-w','sel-snap-b'].forEach(id => {
-    const sel = document.getElementById(id);
-    sel.innerHTML = '<option value="">— select snapshot —</option>';
-    snaps.forEach(s => {
-      const o = document.createElement('option');
-      o.value = s.id; o.textContent = s.label || s.id;
-      sel.appendChild(o);
-    });
-  });
-  if (snaps.length >= 1) document.getElementById('sel-snap-w').value = snaps[0].id;
-  if (snaps.length >= 2) document.getElementById('sel-snap-b').value = snaps[1].id;
-}
-
+// ── Saved searches ────────────────────────────────────────────────────────────
 function loadSaved() {
   const idx = document.getElementById('saved-sel').value;
-  if (!idx && idx !== 0) return;
+  if (idx === '') return;
   const s = savedSearches[parseInt(idx)];
   if (!s) return;
   setTimeout(() => {
-    if (s.networkId) { document.getElementById('sel-net').value = s.networkId; onNetChange(); }
-    setv('inp-src',     s.srcIp         || '');
-    setv('inp-dst',     s.dstIp         || '');
-    setv('sel-intent',  s.intent        || 'PREFER_DELIVERED');
-    setv('sel-proto',   s.ipProto       || '');
-    setv('inp-port',    s.dstPort       || '');
-    setv('inp-maxcand', s.maxCandidates || '5000');
+    if (s.networkId) {
+      document.getElementById('sel-net').value = s.networkId;
+      onNetChange();
+    }
+    setv('inp-src',      s.srcIp         || '');
+    setv('inp-dst',      s.dstIp         || '');
+    setv('sel-intent',   s.intent        || 'PREFER_DELIVERED');
+    setv('sel-proto',    s.ipProto       || '');
+    setv('inp-port',     s.dstPort       || '');
+    setv('inp-maxcand',  s.maxCandidates || '5000');
   }, 300);
 }
-
-function setv(id,val){ const el=document.getElementById(id); if(el) el.value=val; }
 
 async function saveSearch() {
   const name = prompt('Save search as:');
@@ -968,20 +932,24 @@ async function saveSearch() {
     dstPort:       document.getElementById('inp-port').value.trim(),
     maxCandidates: document.getElementById('inp-maxcand').value.trim(),
   });
-  await fetch('/config',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({savedSearches})});
+  await fetch('/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({savedSearches})
+  });
   buildSavedSel();
 }
 
 function clearAll() {
-  ['inp-src','inp-dst','inp-port'].forEach(id=>setv(id,''));
-  runResults=null; activeIdx=null; cache={};
-  document.getElementById('hop-list').innerHTML=
-    '<div class="placeholder"><span class="big">\u2191</span><span>Configure and run</span></div>';
-  document.getElementById('snap-labels').innerHTML=
+  ['inp-src','inp-dst','inp-port'].forEach(id => setv(id, ''));
+  runResults = null; activeIdx = null; cache = {};
+  document.getElementById('hop-list').innerHTML =
+    '<div class="placeholder"><span class="big">&#x2191;</span><span>Configure and run</span></div>';
+  document.getElementById('snap-labels').innerHTML =
     '<span class="snap-label">Select snapshots and run</span>';
   showCfg();
 }
+
+function setv(id, val) { const el = document.getElementById(id); if (el) el.value = val; }
 
 // ── Run ───────────────────────────────────────────────────────────────────────
 async function runDiff() {
@@ -993,250 +961,258 @@ async function runDiff() {
   const intent   = document.getElementById('sel-intent').value;
   const proto    = document.getElementById('sel-proto').value;
   const port     = document.getElementById('inp-port').value.trim();
-  const maxCand  = parseInt(document.getElementById('inp-maxcand').value)||5000;
-  const maxPaths = parseInt(document.getElementById('inp-maxpaths').value)||10;
-  const maxSec   = parseInt(document.getElementById('inp-maxsec').value)||30;
+  const maxCand  = parseInt(document.getElementById('inp-maxcand').value) || 5000;
+  const maxPaths = parseInt(document.getElementById('inp-maxpaths').value) || 10;
+  const maxSec   = parseInt(document.getElementById('inp-maxsec').value)   || 30;
 
-  if (!netId||!snapW||!snapB||!src||!dst){setStatus('Missing required fields',true);return;}
-  if (snapW===snapB){setStatus('Snapshots must differ',true);return;}
+  if (!netId || !snapW || !snapB || !src || !dst) { setStatus('Missing required fields', true); return; }
+  if (snapW === snapB) { setStatus('Snapshots must differ', true); return; }
 
   setStatus('Running path searches\u2026');
-  document.getElementById('run-btn').disabled=true;
+  document.getElementById('run-btn').disabled = true;
   try {
-    const r = await fetch('/run-diff',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({networkId:netId,snapWorking:snapW,snapBroken:snapB,
-        srcIp:src,dstIp:dst,intent,ipProto:proto||null,dstPort:port||null,
-        maxCandidates:maxCand,maxPaths,maxSeconds:maxSec})
+    const r = await fetch('/run-diff', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        networkId: netId, snapWorking: snapW, snapBroken: snapB,
+        srcIp: src, dstIp: dst, intent,
+        ipProto: proto || null, dstPort: port || null,
+        maxCandidates: maxCand, maxPaths, maxSeconds: maxSec,
+      })
     });
     const data = await r.json();
-    if (data.error){setStatus(data.error,true);return;}
-    runResults=data; cache={}; activeIdx=null;
+    if (data.error) { setStatus(data.error, true); return; }
+    runResults = data; cache = {}; activeIdx = null;
     renderHopList(data);
     updateSnapLabels(data);
-    document.getElementById('hdr-filter').style.display='flex';
+    document.getElementById('hdr-filter').style.display = 'flex';
     showCfg();
-    setStatus(data.hops.length+' hops \u00b7 '+data.unique_device_count+' unique devices');
-  } catch(e){
-    setStatus('Request failed: '+e.message,true);
+    setStatus(data.hops.length + ' hops \u00b7 ' + data.unique_device_count + ' unique devices');
+  } catch(e) {
+    setStatus('Request failed: ' + e.message, true);
   } finally {
-    document.getElementById('run-btn').disabled=false;
+    document.getElementById('run-btn').disabled = false;
   }
 }
 
-function setStatus(msg,err=false){
-  const el=document.getElementById('run-status');
-  el.textContent=msg; el.style.color=err?'var(--error)':'var(--muted)';
+function setStatus(msg, err) {
+  const el = document.getElementById('run-status');
+  el.textContent = msg;
+  el.style.color = err ? 'var(--error)' : 'var(--muted)';
 }
 
 function updateSnapLabels(data) {
-  const wl = data.snap_working_label||data.params.snapWorking;
-  const bl = data.snap_broken_label||data.params.snapBroken;
-  const wc = data.working_path_count??'?';
-  const bc = data.broken_path_count??'?';
+  const wl = data.snap_working_label || data.params.snapWorking;
+  const bl = data.snap_broken_label  || data.params.snapBroken;
+  const wc = data.working_path_count != null ? data.working_path_count : '?';
+  const bc = data.broken_path_count  != null ? data.broken_path_count  : '?';
   document.getElementById('snap-labels').innerHTML =
-    '<div><span class="snap-working">\u25cf working</span> '+
-    '<span class="snap-label">'+esc(wl)+' \u00b7 '+wc+' path(s)</span></div>'+
-    '<div style="margin-top:2px"><span class="snap-broken">\u25cf broken</span> '+
-    '<span class="snap-label">'+esc(bl)+' \u00b7 '+bc+' path(s)</span></div>';
+    `<div><span class="snap-working">&#x25cf; working</span> <span class="snap-label">${esc(wl)} &middot; ${wc} path(s)</span></div>` +
+    `<div style="margin-top:2px"><span class="snap-broken">&#x25cf; broken</span> <span class="snap-label">${esc(bl)} &middot; ${bc} path(s)</span></div>`;
 }
 
 // ── Hop list ──────────────────────────────────────────────────────────────────
 function renderHopList(data) {
   const list = document.getElementById('hop-list');
-  list.innerHTML='';
-  data.hops.forEach((hop,i)=>{
+  list.innerHTML = '';
+  data.hops.forEach((hop, i) => {
     const inB   = data.devices_in_broken.includes(hop.deviceName);
     const synth = hop.synthetic;
     const row   = document.createElement('div');
-    row.className='hop-row'+(synth?' synthetic':'');
-    row.dataset.idx=i;
-    row.innerHTML=
-      '<span class="hop-num">'+(i+1)+'</span>'+
-      '<span class="presence '+(synth?'synth':inB?'present':'absent')+'" '+
-        'title="'+(synth?'synthetic':(inB?'present in broken snapshot':'absent from broken snapshot'))+'"></span>'+
-      '<span class="hop-name" title="'+esc(hop.deviceName)+'">'+esc(hop.displayName||hop.deviceName)+'</span>'+
-      '<span class="hop-type">'+esc(hop.deviceType||'')+'</span>'+
-      '<span class="sev sev-pending" id="sev-'+i+'">\u2026</span>';
-    if (!synth) row.addEventListener('click',()=>selectHop(i));
+    row.className = 'hop-row' + (synth ? ' synthetic' : '');
+    row.dataset.idx = i;
+    row.innerHTML =
+      `<span class="hop-num">${i+1}</span>` +
+      `<span class="presence ${synth ? 'synth' : inB ? 'present' : 'absent'}" ` +
+        `title="${synth ? 'synthetic' : inB ? 'present in broken snapshot' : 'absent from broken snapshot'}"></span>` +
+      `<span class="hop-name" title="${esc(hop.deviceName)}">${esc(hop.displayName || hop.deviceName)}</span>` +
+      `<span class="hop-type">${esc(hop.deviceType || '')}</span>` +
+      `<span class="sev sev-pending" id="sev-${i}">&#x2026;</span>`;
+    if (!synth) row.addEventListener('click', () => selectHop(i));
     list.appendChild(row);
   });
 }
 
 async function selectHop(idx) {
-  document.querySelectorAll('.hop-row').forEach(r=>r.classList.remove('active'));
-  const row=document.querySelector('.hop-row[data-idx="'+idx+'"]');
+  document.querySelectorAll('.hop-row').forEach(r => r.classList.remove('active'));
+  const row = document.querySelector(`.hop-row[data-idx="${idx}"]`);
   if (row) row.classList.add('active');
-  activeIdx=idx;
-  const hop=runResults.hops[idx];
-  setRightTitle('ANALYZING: '+(hop.displayName||hop.deviceName));
-  if (cache[hop.deviceName]){showDevPanel(hop,cache[hop.deviceName]);return;}
+  activeIdx = idx;
+  const hop = runResults.hops[idx];
+  setRightTitle('ANALYZING: ' + (hop.displayName || hop.deviceName));
+  if (cache[hop.deviceName]) { showDevPanel(hop, cache[hop.deviceName]); return; }
   showLoading();
   try {
-    const r=await fetch('/analyze-device',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({networkId:runResults.params.networkId,
-        deviceName:hop.deviceName,
-        snapWorking:runResults.params.snapWorking,
-        snapBroken:runResults.params.snapBroken,
-        filterName:currentFilter})
+    const r = await fetch('/analyze-device', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        networkId:   runResults.params.networkId,
+        deviceName:  hop.deviceName,
+        snapWorking: runResults.params.snapWorking,
+        snapBroken:  runResults.params.snapBroken,
+        filterName:  currentFilter,
+      })
     });
-    const data=await r.json();
-    cache[hop.deviceName]=data;
-    setSevBadge(idx,data.severity);
-    showDevPanel(hop,data);
-  } catch(e){
-    document.getElementById('dev-panel').innerHTML='<div class="err-msg">Request failed: '+esc(e.message)+'</div>';
+    const data = await r.json();
+    cache[hop.deviceName] = data;
+    setSevBadge(idx, data.severity);
+    showDevPanel(hop, data);
+  } catch(e) {
+    document.getElementById('dev-panel').innerHTML = `<div class="err-msg">Request failed: ${esc(e.message)}</div>`;
   }
 }
 
-function setSevBadge(idx,sev){
-  const el=document.getElementById('sev-'+idx);
-  if(!el)return;
-  const map={error:['sev-error','!'],warn:['sev-warn','\u25b3'],info:['sev-info','\u25cf'],clean:['sev-clean','\u2713']};
-  const [cls,lbl]=map[sev]||['sev-pending','\u2026'];
-  el.className='sev '+cls; el.textContent=lbl;
+function setSevBadge(idx, sev) {
+  const el = document.getElementById('sev-' + idx);
+  if (!el) return;
+  const map = {error:['sev-error','!'], warn:['sev-warn','\u25b3'], info:['sev-info','\u25cf'], clean:['sev-clean','\u2713']};
+  const [cls, lbl] = map[sev] || ['sev-pending', '\u2026'];
+  el.className = 'sev ' + cls;
+  el.textContent = lbl;
 }
 
-// ── Panel rendering ───────────────────────────────────────────────────────────
-function showCfg(){
-  document.getElementById('cfg-panel').style.display='';
-  document.getElementById('dev-panel').style.display='none';
+// ── Right panel ───────────────────────────────────────────────────────────────
+function showCfg() {
+  document.getElementById('cfg-panel').style.display = '';
+  document.getElementById('dev-panel').style.display = 'none';
   setRightTitle('CONFIGURATION');
 }
-function setRightTitle(t){document.getElementById('right-title').textContent=t;}
-function showLoading(){
-  document.getElementById('cfg-panel').style.display='none';
-  const dp=document.getElementById('dev-panel');
-  dp.style.display=''; dp.innerHTML='<div class="loading-msg">Fetching data\u2026</div>';
+function setRightTitle(t) { document.getElementById('right-title').textContent = t; }
+function showLoading() {
+  document.getElementById('cfg-panel').style.display = 'none';
+  const dp = document.getElementById('dev-panel');
+  dp.style.display = '';
+  dp.innerHTML = '<div class="loading-msg">Fetching data\u2026</div>';
 }
 
-function showDevPanel(hop,data){
-  document.getElementById('cfg-panel').style.display='none';
-  const dp=document.getElementById('dev-panel');
-  dp.style.display='';
-  if(data.synthetic){
-    dp.innerHTML='<div class="loading-msg" style="color:var(--muted)">Synthetic/carrier object \u2014 no device API endpoints available.</div>';
+function showDevPanel(hop, data) {
+  document.getElementById('cfg-panel').style.display = 'none';
+  const dp = document.getElementById('dev-panel');
+  dp.style.display = '';
+  if (data.synthetic) {
+    dp.innerHTML = '<div class="loading-msg" style="color:var(--muted)">Synthetic/carrier object \u2014 no device API endpoints available.</div>';
     return;
   }
-  const errs=(data.errors||[]).map(e=>'<div style="color:var(--error);font-size:0.67rem;margin-bottom:4px">\u26a0 '+esc(e)+'</div>').join('');
-  dp.innerHTML=errs+renderMeta(data.metadata)+renderTopo(data.topology)+renderFiles(data.files);
+  const errs = (data.errors || []).map(e => `<div style="color:var(--error);font-size:0.67rem;margin-bottom:4px">&#x26a0; ${esc(e)}</div>`).join('');
+  dp.innerHTML = errs + renderMeta(data.metadata) + renderTopo(data.topology) + renderFiles(data.files);
 }
 
 // ── Metadata ──────────────────────────────────────────────────────────────────
-function renderMeta(meta){
-  const chg=meta.any_changed;
-  const rows=(meta.rows||[]).map(r=>{
-    const wv=r.working!=null?esc(String(r.working)):'<span class="val-null">\u2014</span>';
-    const bv=r.broken !=null?esc(String(r.broken)) :'<span class="val-null">\u2014</span>';
-    return '<tr'+(r.changed?' class="changed"':'')+'>'+
-      '<td>'+esc(r.field)+'</td>'+
-      '<td>'+(r.changed?'<span class="val-chg">'+wv+'</span>':wv)+'</td>'+
-      '<td>'+(r.changed?'<span class="val-chg">'+bv+'</span>':bv)+'</td></tr>';
+function renderMeta(meta) {
+  const chg = meta.any_changed;
+  const rows = (meta.rows || []).map(r => {
+    const wv = r.working != null ? esc(String(r.working)) : '<span class="val-null">\u2014</span>';
+    const bv = r.broken  != null ? esc(String(r.broken))  : '<span class="val-null">\u2014</span>';
+    return `<tr${r.changed ? ' class="changed"' : ''}>` +
+      `<td>${esc(r.field)}</td>` +
+      `<td>${r.changed ? `<span class="val-chg">${wv}</span>` : wv}</td>` +
+      `<td>${r.changed ? `<span class="val-chg">${bv}</span>` : bv}</td></tr>`;
   }).join('');
-  return section('DEVICE METADATA', chg?'CHANGED':'no change', chg?'badge-changed':'badge-ok', chg,
-    '<table class="meta-tbl"><thead><tr><th>FIELD</th><th>WORKING</th><th>BROKEN</th></tr></thead><tbody>'+rows+'</tbody></table>');
+  return mkSection('DEVICE METADATA', chg ? 'CHANGED' : 'no change', chg ? 'badge-changed' : 'badge-ok', chg,
+    `<table class="meta-tbl"><thead><tr><th>FIELD</th><th>WORKING</th><th>BROKEN</th></tr></thead><tbody>${rows}</tbody></table>`);
 }
 
 // ── Topology ──────────────────────────────────────────────────────────────────
-function renderTopo(topo){
-  const chg=topo.any_changed;
-  const badge=chg?(topo.lost_count+' lost, '+topo.new_count+' new'):'no change';
-  const rows=(topo.rows||[]).map(r=>{
-    const cls='link-'+r.status;
-    const pfx=r.status==='lost'?'\u2212':r.status==='new'?'+':' ';
-    return '<tr><td class="'+cls+' link-stat">'+pfx+' '+r.status.toUpperCase()+'</td>'+
-      '<td class="'+cls+'">'+esc(r.sourcePort)+'</td>'+
-      '<td class="'+cls+'">\u2194 '+esc(r.targetPort)+'</td></tr>';
+function renderTopo(topo) {
+  const chg = topo.any_changed;
+  const badge = chg ? (topo.lost_count + ' lost, ' + topo.new_count + ' new') : 'no change';
+  const rows = (topo.rows || []).map(r => {
+    const cls = 'link-' + r.status;
+    const pfx = r.status === 'lost' ? '\u2212' : r.status === 'new' ? '+' : ' ';
+    return `<tr><td class="${cls} link-stat">${pfx} ${r.status.toUpperCase()}</td>` +
+      `<td class="${cls}">${esc(r.sourcePort)}</td>` +
+      `<td class="${cls}">\u2194 ${esc(r.targetPort)}</td></tr>`;
   }).join('');
-  const body=rows
-    ?'<table class="topo-tbl"><thead><tr><th>STATUS</th><th>SOURCE PORT</th><th>TARGET PORT</th></tr></thead><tbody>'+rows+'</tbody></table>'
-    :'<div style="color:var(--muted);font-size:0.69rem">No topology links found for this device.</div>';
-  return section('TOPOLOGY LINKS',badge,chg?'badge-changed':'badge-ok',chg,body);
+  const body = rows
+    ? `<table class="topo-tbl"><thead><tr><th>STATUS</th><th>SOURCE PORT</th><th>TARGET PORT</th></tr></thead><tbody>${rows}</tbody></table>`
+    : '<div style="color:var(--muted);font-size:0.69rem">No topology links found for this device.</div>';
+  return mkSection('TOPOLOGY LINKS', badge, chg ? 'badge-changed' : 'badge-ok', chg, body);
 }
 
 // ── Files ─────────────────────────────────────────────────────────────────────
-function renderFiles(files){
-  const anyChg=files.some(f=>f.changed||f.status==='only_working'||f.status==='only_broken');
-  const cnt=files.filter(f=>f.changed||f.status==='only_working'||f.status==='only_broken').length;
-  const badge=anyChg?(cnt+' file(s) changed'):'no change';
-  const items=files.map((f,i)=>renderFileItem(f,i)).join('');
-  return section('FILE DIFF',badge,anyChg?'badge-changed':'badge-ok',anyChg,
-    '<div class="file-list">'+(items||'<div style="color:var(--muted);font-size:0.69rem">No files available.</div>')+'</div>');
+function renderFiles(files) {
+  const anyChg  = files.some(f => f.changed || f.status === 'only_working' || f.status === 'only_broken');
+  const cnt     = files.filter(f => f.changed || f.status === 'only_working' || f.status === 'only_broken').length;
+  const badge   = anyChg ? (cnt + ' file(s) changed') : 'no change';
+  const items   = files.map((f, i) => renderFileItem(f, i)).join('');
+  return mkSection('FILE DIFF', badge, anyChg ? 'badge-changed' : 'badge-ok', anyChg,
+    `<div class="file-list">${items || '<div style="color:var(--muted);font-size:0.69rem">No files available.</div>'}</div>`);
 }
 
-function renderFileItem(f,i){
-  const id='fb-'+i;
-  let bcls,btxt;
-  if(f.status==='only_working'){bcls='fb-only-w';btxt='ONLY IN WORKING';}
-  else if(f.status==='only_broken'){bcls='fb-only-b';btxt='ONLY IN BROKEN';}
-  else if(f.status==='error'){bcls='fb-error';btxt='ERROR';}
-  else if(f.changed){bcls='fb-changed';btxt='CHANGED';}
-  else{bcls='fb-unchanged';btxt='unchanged';}
-
-  const autoOpen=f.changed&&!f.noisy;
-  let body='';
-  if(f.status==='diff'&&f.changed){
-    const suppNote=f.suppressed_count>0?'<div class="supp-note">'+f.suppressed_count+' line(s) suppressed by noise filter</div>':'';
-    const lines=(f.meaningful_lines||[]).map(l=>{
-      if(l.startsWith('+')&&!l.startsWith('+++'))return'<div class="diff-line diff-add">'+esc(l)+'</div>';
-      if(l.startsWith('-')&&!l.startsWith('---'))return'<div class="diff-line diff-del">'+esc(l)+'</div>';
-      if(l.startsWith('@@'))return'<div class="diff-line diff-hdr">'+esc(l)+'</div>';
-      return'<div class="diff-line diff-ctx">'+esc(l)+'</div>';
+function renderFileItem(f, i) {
+  const id = 'fb-' + i;
+  let bcls, btxt;
+  if      (f.status === 'only_working') { bcls = 'fb-only-w'; btxt = 'ONLY IN WORKING'; }
+  else if (f.status === 'only_broken')  { bcls = 'fb-only-b'; btxt = 'ONLY IN BROKEN'; }
+  else if (f.status === 'error')        { bcls = 'fb-error';  btxt = 'ERROR'; }
+  else if (f.changed)                   { bcls = 'fb-changed'; btxt = 'CHANGED'; }
+  else                                  { bcls = 'fb-unchanged'; btxt = 'unchanged'; }
+  const autoOpen = f.changed && !f.noisy;
+  let body = '';
+  if (f.status === 'diff' && f.changed) {
+    const suppNote = f.suppressed_count > 0 ? `<div class="supp-note">${f.suppressed_count} line(s) suppressed by noise filter</div>` : '';
+    const lines = (f.meaningful_lines || []).map(l => {
+      if (l.startsWith('+') && !l.startsWith('+++')) return `<div class="diff-line diff-add">${esc(l)}</div>`;
+      if (l.startsWith('-') && !l.startsWith('---')) return `<div class="diff-line diff-del">${esc(l)}</div>`;
+      if (l.startsWith('@@')) return `<div class="diff-line diff-hdr">${esc(l)}</div>`;
+      return `<div class="diff-line diff-ctx">${esc(l)}</div>`;
     }).join('');
-    const rawLines=(f.raw_lines||[]).map(l=>{
-      if(l.startsWith('+')&&!l.startsWith('+++'))return'<div class="diff-line diff-add">'+esc(l)+'</div>';
-      if(l.startsWith('-')&&!l.startsWith('---'))return'<div class="diff-line diff-del">'+esc(l)+'</div>';
-      if(l.startsWith('@@'))return'<div class="diff-line diff-hdr">'+esc(l)+'</div>';
-      return'<div class="diff-line diff-ctx">'+esc(l)+'</div>';
+    const rawLines = (f.raw_lines || []).map(l => {
+      if (l.startsWith('+') && !l.startsWith('+++')) return `<div class="diff-line diff-add">${esc(l)}</div>`;
+      if (l.startsWith('-') && !l.startsWith('---')) return `<div class="diff-line diff-del">${esc(l)}</div>`;
+      if (l.startsWith('@@')) return `<div class="diff-line diff-hdr">${esc(l)}</div>`;
+      return `<div class="diff-line diff-ctx">${esc(l)}</div>`;
     }).join('');
-    const hasRaw=f.raw_lines&&f.raw_lines.length!==(f.meaningful_lines||[]).length;
-    body='<div class="diff-meta"><span>'+((f.meaningful_lines||[]).filter(l=>(l.startsWith('+')||l.startsWith('-'))&&!l.startsWith('+++')||l.startsWith('---')?false:l.startsWith('+')||l.startsWith('-')).length)+' meaningful changes</span>'+(f.suppressed_count?'<span>'+f.suppressed_count+' suppressed</span>':'')+'</div>'+
-      suppNote+'<div class="diff-view">'+lines+'</div>'+
-      (hasRaw?'<div class="diff-toggle"><button class="btn-sm" onclick="toggleRaw(\'raw-'+i+'\',this)">show raw diff</button><div id="raw-'+i+'" style="display:none"><div class="diff-view">'+rawLines+'</div></div></div>':'');
-  }else if(f.status==='diff'&&!f.changed){
-    body='<div style="padding:7px 10px;font-size:0.67rem;color:var(--muted)">Files are identical.</div>';
-  }else if(f.status==='error'){
-    body='<div style="padding:7px 10px;font-size:0.67rem;color:var(--error)">'+esc(f.error||'Unknown error')+'</div>';
+    const hasRaw = f.raw_lines && f.raw_lines.length !== (f.meaningful_lines || []).length;
+    const mCount = (f.meaningful_lines || []).filter(l => (l.startsWith('+') && !l.startsWith('+++')) || (l.startsWith('-') && !l.startsWith('---'))).length;
+    body = `<div class="diff-meta"><span>${mCount} meaningful changes</span>${f.suppressed_count ? `<span>${f.suppressed_count} suppressed</span>` : ''}</div>` +
+      suppNote + `<div class="diff-view">${lines}</div>` +
+      (hasRaw ? `<div class="diff-toggle"><button class="btn-sm" onclick="toggleRaw('raw-${i}',this)">show raw diff</button><div id="raw-${i}" style="display:none"><div class="diff-view">${rawLines}</div></div></div>` : '');
+  } else if (f.status === 'diff' && !f.changed) {
+    body = '<div style="padding:7px 10px;font-size:0.67rem;color:var(--muted)">Files are identical.</div>';
+  } else if (f.status === 'error') {
+    body = `<div style="padding:7px 10px;font-size:0.67rem;color:var(--error)">${esc(f.error || 'Unknown error')}</div>`;
   }
-
-  return '<div class="file-item">'+
-    '<div class="file-hdr" onclick="toggleFileBody(\''+id+'\')">'+
-    '<span class="file-name">'+esc(f.name)+'</span>'+
-    (f.noisy?'<span style="font-size:0.57rem;color:var(--muted)">(high-noise)</span>':'')+
-    '<span class="file-badge '+bcls+'">'+btxt+'</span></div>'+
-    '<div class="file-body'+(autoOpen?' open':'')+'" id="'+id+'">'+body+'</div></div>';
+  return `<div class="file-item">` +
+    `<div class="file-hdr" onclick="toggleFileBody('${id}')">` +
+    `<span class="file-name">${esc(f.name)}</span>` +
+    (f.noisy ? '<span style="font-size:0.57rem;color:var(--muted)">(high-noise)</span>' : '') +
+    `<span class="file-badge ${bcls}">${btxt}</span></div>` +
+    `<div class="file-body${autoOpen ? ' open' : ''}" id="${id}">${body}</div></div>`;
 }
 
-function section(title,badge,badgeCls,open,body){
-  return '<div class="section">'+
-    '<div class="sec-hdr'+(open?' open':'')+'" onclick="toggleSec(this)">'+
-    '<span class="chev">'+(open?'\u25bc':'\u25b6')+'</span>'+
-    '<span class="sec-title">'+title+'</span>'+
-    '<span class="sec-badge '+badgeCls+'">'+badge+'</span></div>'+
-    '<div class="sec-body'+(open?' open':'')+'">'+body+'</div></div>';
+// ── Section helper ────────────────────────────────────────────────────────────
+function mkSection(title, badge, badgeCls, open, body) {
+  return `<div class="section">` +
+    `<div class="sec-hdr${open ? ' open' : ''}" onclick="toggleSec(this)">` +
+    `<span class="chev">${open ? '\u25bc' : '\u25b6'}</span>` +
+    `<span class="sec-title">${title}</span>` +
+    `<span class="sec-badge ${badgeCls}">${badge}</span></div>` +
+    `<div class="sec-body${open ? ' open' : ''}">${body}</div></div>`;
 }
 
-function toggleSec(hdr){
-  const body=hdr.nextElementSibling;
-  const chev=hdr.querySelector('.chev');
-  const open=body.classList.toggle('open');
-  hdr.classList.toggle('open',open);
-  if(chev)chev.textContent=open?'\u25bc':'\u25b6';
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function toggleSec(hdr) {
+  const body = hdr.nextElementSibling;
+  const chev = hdr.querySelector('.chev');
+  const open = body.classList.toggle('open');
+  hdr.classList.toggle('open', open);
+  if (chev) chev.textContent = open ? '\u25bc' : '\u25b6';
 }
-function toggleFileBody(id){const el=document.getElementById(id);if(el)el.classList.toggle('open');}
-function toggleRaw(id,btn){
-  const el=document.getElementById(id);if(!el)return;
-  const open=el.style.display==='none';
-  el.style.display=open?'':'none';
-  btn.textContent=open?'hide raw diff':'show raw diff';
+function toggleFileBody(id) { const el = document.getElementById(id); if (el) el.classList.toggle('open'); }
+function toggleRaw(id, btn) {
+  const el = document.getElementById(id); if (!el) return;
+  const open = el.style.display === 'none';
+  el.style.display = open ? '' : 'none';
+  btn.textContent  = open ? 'hide raw diff' : 'show raw diff';
 }
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
+function esc(s) { return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
 
 boot();
 </script>
 </body>
 </html>"""
+
 
 
 # ─────────────────────────────────────────────────────────────────────────────
