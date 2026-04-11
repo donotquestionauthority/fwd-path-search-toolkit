@@ -100,17 +100,23 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
     req.add_header("Accept", "application/json")
 
     t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=max_seconds + 10) as resp:
-            body   = resp.read().decode("utf-8")
-            status = resp.status
-    except urllib.error.HTTPError as e:
-        body   = e.read().decode("utf-8")
-        status = e.code
-    except Exception as ex:
-        return None, str(ex), round((time.time() - t0) * 1000)
+    last_err = None
+    for attempt in range(2):
+        if attempt > 0:
+            time.sleep(3)
+        try:
+            with urllib.request.urlopen(req, timeout=max_seconds + 120) as resp:
+                body   = resp.read().decode("utf-8")
+                status = resp.status
+            return status, body, round((time.time() - t0) * 1000)
+        except urllib.error.HTTPError as e:
+            body   = e.read().decode("utf-8")
+            status = e.code
+            return status, body, round((time.time() - t0) * 1000)
+        except Exception as ex:
+            last_err = str(ex)
 
-    return status, body, round((time.time() - t0) * 1000)
+    return None, last_err, round((time.time() - t0) * 1000)
 
 
 def analyze_paths(body, consensus_threshold):

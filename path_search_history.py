@@ -652,7 +652,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="card-title">── HISTORY SETTINGS</div>
       <div class="row">
         <label>Days back</label>
-        <input type="number" id="days-back" value="30" min="1" max="365">
+        <input type="number" id="days-back" value="7" min="1" max="365">
         <span class="hint">all snapshots in this window are queried</span>
       </div>
       <div class="card-sep"></div>
@@ -905,7 +905,7 @@ async function runHistory() {
   const maxCand       = parseInt(document.getElementById('max-cand').value) || 5000;
   const maxResults    = parseInt(document.getElementById('max-results').value) || 1;
   const maxSec        = parseInt(document.getElementById('max-sec').value) || 30;
-  const daysBack      = parseInt(document.getElementById('days-back').value) || 30;
+  const daysBack      = parseInt(document.getElementById('days-back').value) || 7;
   const normPeers     = document.getElementById('normalize-peers').checked;
 
   if (!srcIp || !dstIp) { alert('srcIp and dstIp are required.'); return; }

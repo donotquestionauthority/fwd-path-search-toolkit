@@ -1735,8 +1735,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
         elif self.path == '/proxy':
             try:
-                req_data = json.loads(raw)
-                url       = req_data['url']
+                req_data   = json.loads(raw)
+                url        = req_data['url']
                 network_id = req_data['networkId']
 
                 if network_id not in CREDENTIALS:
@@ -1744,22 +1744,45 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         json.dumps({'error': f'No credentials loaded for network {network_id}. Restart and enter credentials.'}).encode())
                     return
 
+                # Extract maxSeconds from the URL query string so the socket
+                # timeout respects whatever the user configured in the UI.
+                import urllib.parse as _urlparse
+                _qs         = _urlparse.urlparse(url).query
+                _params     = dict(p.split('=') for p in _qs.split('&') if '=' in p)
+                _max_sec    = int(_params.get('maxSeconds', 30))
+                _sock_timeout = _max_sec + 120
+
                 req = urllib.request.Request(url)
                 req.add_header('Authorization', CREDENTIALS[network_id])
                 req.add_header('Accept', 'application/json')
 
-                try:
-                    with urllib.request.urlopen(req, timeout=60) as resp:
-                        status  = resp.status
-                        headers = list(resp.headers.items())
-                        body    = resp.read().decode('utf-8')
-                except urllib.error.HTTPError as e:
-                    status  = e.code
-                    headers = list(e.headers.items()) if e.headers else []
-                    body    = e.read().decode('utf-8')
+                last_err = None
+                for attempt in range(2):
+                    if attempt > 0:
+                        import time as _t; _t.sleep(3)
+                    try:
+                        with urllib.request.urlopen(req, timeout=_sock_timeout) as resp:
+                            status  = resp.status
+                            headers = list(resp.headers.items())
+                            body    = resp.read().decode('utf-8')
+                        result = json.dumps({'status': status, 'headers': headers, 'body': body})
+                        self._respond(200, 'application/json', result.encode('utf-8'))
+                        last_err = None
+                        break
+                    except urllib.error.HTTPError as e:
+                        status  = e.code
+                        headers = list(e.headers.items()) if e.headers else []
+                        body    = e.read().decode('utf-8')
+                        result  = json.dumps({'status': status, 'headers': headers, 'body': body})
+                        self._respond(200, 'application/json', result.encode('utf-8'))
+                        last_err = None
+                        break
+                    except Exception as ex:
+                        last_err = str(ex)
 
-                result = json.dumps({'status': status, 'headers': headers, 'body': body})
-                self._respond(200, 'application/json', result.encode('utf-8'))
+                if last_err is not None:
+                    self._respond(200, 'application/json',
+                        json.dumps({'error': last_err}).encode('utf-8'))
 
             except Exception as e:
                 self._respond(200, 'application/json',
