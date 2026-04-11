@@ -18,6 +18,7 @@ import json
 import os
 import urllib.request
 import urllib.error
+import urllib.parse
 import base64
 import time
 import importlib.util
@@ -94,7 +95,7 @@ def api_get(base_url, network_id, path, params=None):
     """
     if network_id not in CREDENTIALS:
         return None, None, f"No credentials for network {network_id}"
-    qs  = ("?" + "&".join(f"{k}={v}" for k, v in params.items())) if params else ""
+    qs  = ("?" + urllib.parse.urlencode(params)) if params else ""
     url = f"{base_url.rstrip('/')}{path}{qs}"
     req = urllib.request.Request(url)
     req.add_header("Authorization", CREDENTIALS[network_id])
@@ -176,7 +177,7 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
     if network_id not in CREDENTIALS:
         return None, None, 0, f"No credentials for network {network_id}"
 
-    qs  = "&".join(f"{k}={v}" for k, v in params.items())
+    qs  = urllib.parse.urlencode(params)
     url = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
     req = urllib.request.Request(url)
     req.add_header("Authorization", CREDENTIALS[network_id])
@@ -237,8 +238,6 @@ def extract_fw_fingerprint(paths, normalize_peers):
 def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
                intent, max_candidates, max_results, ip_proto, dst_port, max_seconds):
     """Build the API URL and app search string/URL for display."""
-    from urllib.parse import urlencode
-
     params = {
         "srcIp":         src_ip,
         "dstIp":         dst_ip,
@@ -253,7 +252,7 @@ def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
     if dst_port:
         params["dstPort"] = str(dst_port)
 
-    api_url = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{urlencode(params)}"
+    api_url = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{urllib.parse.urlencode(params)}"
 
     PROTO_MAP = {"1":"ICMP","6":"TCP","17":"UDP","47":"GRE","50":"ESP","51":"AH","58":"ICMPv6"}
     search = f"f({src_ip})(ipv4_dst.{dst_ip})"
@@ -264,7 +263,7 @@ def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
     search += "m(permit_all)"
 
     app_params = {"networkId": network_id, "snapshotId": snapshot_id, "q": search}
-    app_url    = f"{base_url.rstrip('/')}/?/search?{urlencode(app_params)}"
+    app_url    = f"{base_url.rstrip('/')}/?/search?{urllib.parse.urlencode(app_params)}"
 
     return api_url, search, app_url
 

@@ -14,6 +14,7 @@ import json
 import os
 import urllib.request
 import urllib.error
+import urllib.parse
 import base64
 import time
 import importlib.util
@@ -88,7 +89,7 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
     if snapshot_id:
         params["snapshotId"] = snapshot_id
 
-    qs   = "&".join(f"{k}={v}" for k, v in params.items())
+    qs   = urllib.parse.urlencode(params)
     url  = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
 
     if network_id not in CREDENTIALS:
