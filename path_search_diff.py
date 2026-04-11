@@ -718,7 +718,7 @@ HTML = """<!DOCTYPE html>
       <span class="right-title" id="right-title">CONFIGURATION</span>
       <span id="hdr-filter" style="margin-left:auto;display:none;align-items:center;gap:6px">
         <span style="font-size:0.63rem;color:var(--muted)">noise filter:</span>
-        <select id="hdr-filter-sel" onchange="syncFilter('hdr')"
+        <select id="hdr-filter-sel" onchange="syncFilter('hdr')" autocomplete="off" data-form-type="other" data-lpignore="true"
           style="background:var(--surface);border:1px solid var(--border);color:var(--text);
                  padding:3px 6px;border-radius:4px;font-family:inherit;font-size:0.67rem">
         </select>
@@ -732,19 +732,19 @@ HTML = """<!DOCTYPE html>
 
         <div class="saved-row">
           <label>SAVED SEARCHES</label>
-          <select id="saved-sel" autocomplete="off" data-form-type="other" onchange="loadSaved()">
+          <select id="saved-sel" autocomplete="off" data-form-type="other" data-lpignore="true" onchange="loadSaved()">
             <option value="">— select a saved search —</option>
           </select>
         </div>
 
         <div class="field-group row2">
           <div><label>NETWORK</label>
-            <select id="sel-net" autocomplete="off" data-form-type="other" onchange="onNetChange()">
+            <select id="sel-net" autocomplete="off" data-form-type="other" data-lpignore="true" onchange="onNetChange()">
               <option value="">Loading...</option>
             </select>
           </div>
           <div><label>INTENT</label>
-            <select id="sel-intent" autocomplete="off" data-form-type="other">
+            <select id="sel-intent" autocomplete="off" data-form-type="other" data-lpignore="true">
               <option value="PREFER_DELIVERED">PREFER_DELIVERED</option>
               <option value="PREFER_DELIVERED_NO_VIOLATIONS">PREFER_DELIVERED_NO_VIOLATIONS</option>
               <option value="DELIVERED">DELIVERED</option>
@@ -756,12 +756,12 @@ HTML = """<!DOCTYPE html>
 
         <div class="field-group row2">
           <div><label>WORKING SNAPSHOT</label>
-            <select id="sel-snap-w" autocomplete="off" data-form-type="other">
+            <select id="sel-snap-w" autocomplete="off" data-form-type="other" data-lpignore="true">
               <option value="">Select network first</option>
             </select>
           </div>
           <div><label>BROKEN SNAPSHOT</label>
-            <select id="sel-snap-b" autocomplete="off" data-form-type="other">
+            <select id="sel-snap-b" autocomplete="off" data-form-type="other" data-lpignore="true">
               <option value="">Select network first</option>
             </select>
           </div>
@@ -769,16 +769,16 @@ HTML = """<!DOCTYPE html>
 
         <div class="field-group row2">
           <div><label>SOURCE IP</label>
-            <input id="inp-src" type="text" placeholder="10.0.0.1" autocomplete="off" data-form-type="other">
+            <input id="inp-src" type="text" placeholder="10.0.0.1" autocomplete="off" data-form-type="other" data-lpignore="true">
           </div>
           <div><label>DESTINATION IP</label>
-            <input id="inp-dst" type="text" placeholder="10.0.0.2" autocomplete="off" data-form-type="other">
+            <input id="inp-dst" type="text" placeholder="10.0.0.2" autocomplete="off" data-form-type="other" data-lpignore="true">
           </div>
         </div>
 
         <div class="field-group row4">
           <div><label>IP PROTOCOL</label>
-            <select id="sel-proto" autocomplete="off" data-form-type="other">
+            <select id="sel-proto" autocomplete="off" data-form-type="other" data-lpignore="true">
               <option value="">Any</option>
               <option value="6">TCP (6)</option>
               <option value="17">UDP (17)</option>
@@ -786,25 +786,25 @@ HTML = """<!DOCTYPE html>
             </select>
           </div>
           <div><label>DST PORT</label>
-            <input id="inp-port" type="text" placeholder="443" autocomplete="off" data-form-type="other">
+            <input id="inp-port" type="text" placeholder="443" autocomplete="off" data-form-type="other" data-lpignore="true">
           </div>
           <div><label>MAX CANDIDATES</label>
-            <input id="inp-maxcand" type="text" value="5000" autocomplete="off" data-form-type="other">
+            <input id="inp-maxcand" type="text" value="5000" autocomplete="off" data-form-type="other" data-lpignore="true">
           </div>
           <div><label>MAX SECONDS</label>
-            <input id="inp-maxsec" type="text" value="30" autocomplete="off" data-form-type="other">
+            <input id="inp-maxsec" type="text" value="30" autocomplete="off" data-form-type="other" data-lpignore="true">
           </div>
         </div>
 
         <div class="field-group row2">
           <div><label>PATHS TO ANALYZE (unique device union)</label>
-            <input id="inp-maxpaths" type="text" value="10" autocomplete="off" data-form-type="other">
+            <input id="inp-maxpaths" type="text" value="10" autocomplete="off" data-form-type="other" data-lpignore="true">
           </div>
           <div style="display:flex;flex-direction:column;justify-content:flex-end">
             <div class="filter-inline" style="margin-bottom:0">
               <label>NOISE FILTER</label>
               <select id="cfg-filter-sel" onchange="syncFilter('cfg')"
-                autocomplete="off" data-form-type="other">
+                autocomplete="off" data-form-type="other" data-lpignore="true">
               </select>
               <span id="filter-desc" class="fdesc"></span>
             </div>
