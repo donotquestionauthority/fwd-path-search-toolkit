@@ -848,10 +848,14 @@ async function boot() {
   savedSearches = cfg.savedSearches || [];
   filterDefs    = fd;
 
-  buildNetSel();
-  buildSavedSel();
-  buildFilterSels();
-  updateFilterDesc();
+  // Delay dropdown population to let password managers (Dashlane etc)
+  // finish injecting before we write options — otherwise they wipe them.
+  setTimeout(() => {
+    buildNetSel();
+    buildSavedSel();
+    buildFilterSels();
+    updateFilterDesc();
+  }, 300);
 }
 
 function buildNetSel() {
