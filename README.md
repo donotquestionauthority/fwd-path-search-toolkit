@@ -2,8 +2,10 @@
 
 **By Robert Tavoularis** · Senior Customer Success Engineer · Forward Networks
 
-A collection of local browser-based tools for building, comparing, and auditing
-Forward Networks Path Search API queries — no external dependencies, pure Python stdlib.
+A collection of local browser-based tools for working with the Forward Networks
+Path Search API — building queries interactively, testing parameter combinations,
+auditing results across historical snapshots, and investigating why a path search
+changes between snapshots. No external dependencies, pure Python stdlib.
 
 ---
 
@@ -11,11 +13,12 @@ Forward Networks Path Search API queries — no external dependencies, pure Pyth
 
 | Script | Port | Purpose |
 |---|---|---|
-| `path_search_builder.py` | 8765 | Interactive URL builder + live API runner with firewall analysis |
-| `path_search_compare.py` | 8766 | Parameter matrix tester — find which combination reliably surfaces firewalls |
-| `path_search_history.py` | 8767 | Day-by-day snapshot audit — detect when firewall visibility changes across snapshots |
+| `path_search_builder.py` | 8765 | Interactive query builder and live API runner |
+| `path_search_compare.py` | 8766 | Parameter matrix tester — find the combination that produces the most consistent results |
+| `path_search_history.py` | 8767 | Snapshot history audit — track how path search results change over time |
+| `path_search_diff.py`    | 8768 | Snapshot diff investigator — hop-by-hop analysis of why a path search changed between two snapshots |
 
-All three tools share the same credential and network discovery mechanism, and
+All four tools share the same credential and network discovery mechanism, and
 read/write the same `path_search_config.json` file for saved searches.
 
 ---
@@ -66,6 +69,7 @@ source ~/.zshrc
 python3 path_search_builder.py
 python3 path_search_compare.py
 python3 path_search_history.py
+python3 path_search_diff.py
 ```
 
 Each script starts a local web server and opens your browser automatically.
@@ -86,7 +90,7 @@ The core tool. Build and execute Forward Networks
 - Live JSON response with syntax highlighting
 - Navigate multi-path results one at a time
 - Filter results by `forwardingOutcome`, `securityOutcome`, device type, device name, and display name
-- **Firewall Summary panel** — compares firewall sets across all returned paths to validate result consistency
+- Firewall summary panel — compares firewall device sets across all returned paths to validate consistency
 - Generate the equivalent Forward Networks App search string and deep-link URL for in-app follow-up
 - Save and reload named searches
 
@@ -96,45 +100,44 @@ The core tool. Build and execute Forward Networks
 |---|---|
 | `srcIp` | Source IP (required) |
 | `dstIp` | Destination IP (required) |
-| `intent` | `PREFER_DELIVERED` (most paths), `PREFER_VIOLATIONS` (policy violations first), `VIOLATIONS_ONLY` |
+| `intent` | Path selection strategy: `PREFER_DELIVERED`, `PREFER_DELIVERED_NO_VIOLATIONS`, `DELIVERED`, `VIOLATIONS`, `ALL` |
 | `ipProto` | IP protocol number: `6`=TCP, `17`=UDP, `1`=ICMP |
 | `dstPort` | Destination port (0–65535) |
-| `maxCandidates` | How many candidate paths to evaluate (higher = more thorough, slower) |
+| `maxCandidates` | Search space size — how many candidate paths to evaluate (higher = more thorough, slower) |
 | `maxResults` | How many paths to return |
-| `maxSeconds` | Query timeout |
-| `includeNetworkFunctions` | Include virtualized network functions in the path |
+| `maxSeconds` | Query timeout (API default 30, max 300) |
+
 ---
 
 ### Path Search Comparison (`path_search_compare.py`)
 
-Automates the "which parameters surface firewalls?" question by running the same
-src/dst pairs across a configurable matrix of `maxCandidates`, `intent`, and port
-combinations, then scoring each combination.
+Runs the same src/dst pairs across a configurable matrix of `maxCandidates`, `intent`,
+and port combinations, then scores and ranks each combination by result consistency.
+Useful when you need to determine which parameter set reliably produces the expected
+result and gives you confidence the model is working correctly for a given flow.
 
 **Features:**
 - Enter multiple src/dst pairs at once
 - Configurable parameter matrix (candidates × intents × ports)
-- Per-row analysis: path count, firewall hit rate, consensus quality, whether result #1 has a firewall
-- **Combination ranking** scored on:
-  - Result #1 has FW (50 pts) — the most actionable signal
-  - Consensus is CLEAN or SOFT (30 pts) — path set is internally consistent
-  - Result #1 matches the dominant FW fingerprint (20 pts)
+- Per-combination scoring based on result consistency and whether the top result matches
+  the expected path
+- Combination ranking with plain-English verdict
 - CSV export
 
 **Consensus definitions:**
 
 | Status | Meaning |
 |---|---|
-| `CLEAN` | All FW-containing paths traverse the same firewall set |
+| `CLEAN` | All paths with the expected device set traverse the same set consistently |
 | `SOFT` | ≥ threshold % (configurable, default 80%) traverse the same set |
-| `SPLIT` | FW paths are split across multiple distinct firewall sets |
-| `NO_FIREWALL` | No FIREWALL hops found in any returned path |
+| `SPLIT` | Results are split across multiple distinct device sets |
+| `NO_FIREWALL` | No firewall hops found in any returned path |
 
 **Workflow:**
-1. Enter a representative set of src/dst pairs (the more diverse, the better)
+1. Enter a representative set of src/dst pairs
 2. Set your candidate range (e.g. `50,5000,10000`) and ports (`none,443,80`)
 3. Run — the tool executes every combination sequentially
-4. Read the **Combination Ranking** at the bottom for a go/no-go verdict
+4. Read the **Combination Ranking** at the bottom for a verdict
 5. Take the winning combination back to the Builder for deeper investigation
 
 ---
@@ -142,49 +145,74 @@ combinations, then scoring each combination.
 ### Path Search History (`path_search_history.py`)
 
 Runs the same path search across historical snapshots going back a configurable
-number of days and reports how firewall visibility changes over time.
+number of days and reports how results change over time.
 
 **Features:**
-- Select how many days back to audit (configurable in the UI)
-- For each snapshot in range, runs the path search and records the firewall set
-- Day-by-day timeline showing which snapshots have firewalls, which don't
-- **Change detection** — flags days where the firewall set changes from the previous snapshot
-- Distinguishes between:
-  - **Firewall set change** (different devices) — flagged, likely meaningful
-  - **Path count change only** — noted but not flagged as a problem
-  - **No firewall at all** — flagged as a regression
-- Configurable "ignore ECMP peers" mode: when enabled, device-level redundant pairs
-  (e.g. `fw-a` / `fw-b` in an active/standby cluster) are normalized before comparison
-  so failovers don't generate false positives
+- Configurable audit window (default 7 days)
+- For each snapshot in range, runs the path search and records the result set
+- Day-by-day timeline with change detection between consecutive snapshots
+- Detects and classifies changes:
+  - **Path hops changed** — devices appearing in the path are different from the previous snapshot, with details on which devices were added, removed, or swapped
+  - **Peer swap** — hop set changed but all differences are fuzzy-matched peer devices (e.g. `sw-01` → `sw-02`), rendered as a softer callout
+  - **Firewall set changed** — the set of firewall devices in the path changed
+  - **Path count only** — same device set, different number of returned paths (likely ECMP variation)
+- Configurable peer normalization: strips trailing `-a`/`-b` suffixes before comparing
+  device names, so active/standby failovers don't generate false positives
+- Per-row expand panel with app search string, app URL, API URL, and full JSON response
+- Summary bar and CSV export
 
 **Use case:**
-A customer reports "path search worked last week but the firewall isn't showing up
-anymore." Use this tool to find exactly which snapshot introduced the regression.
+A path search returns different results than expected. Use this tool to find which
+snapshot introduced the change and get a precise description of what shifted.
+
+---
+
+### Path Search Diff (`path_search_diff.py`)
+
+Investigates why a path search returns results in one snapshot but not another.
+For each device on the working path, runs a three-layer analysis across both snapshots.
+
+**Features:**
+- Runs path search against both snapshots and shows the working path as a hop list
+- Each hop shows a presence indicator (green = device in broken path, red = absent)
+- Severity badge per device, computed on demand: `!` error · `△` metadata/topology changed · `●` file changes only · `✓` clean
+- Unions device names across ECMP-equivalent paths from the working snapshot, so
+  redundant parallel devices are all included in the investigation set
+- **Device metadata diff** — side-by-side comparison of `osVersion`, `collectionError`,
+  `processingError`, `vendor`, `model`, `platform` between snapshots
+- **Topology link diff** — interface adjacency changes between snapshots (lost links in red, new in green)
+- **File diff** — unified diff of every device file across both snapshots, with configurable
+  noise suppression to filter counters, timers, and other high-churn fields
+- Noise filter selectable in the UI (default / strict / off); patterns stored in
+  `path_diff_filters.json` for easy editing
+- Shared saved searches via `path_search_config.json`
+
+**Use case:**
+A path search returns 10 hops in snapshot A but only 3 in snapshot B, or returns nothing
+at all. Work through each device on the known-good path to find what changed — a downed
+interface, a config change, a collection error, or a lost topology adjacency.
 
 ---
 
 ## Shared Configuration
 
 All tools read and write `path_search_config.json` in the same directory.
-This file stores saved searches (Builder) and is created automatically on first run.
+This file stores saved searches and is created automatically on first run.
 
 ```json
 {
   "savedSearches": [
     {
       "name": "prod-web-to-db",
-      "params": {
-        "base": "https://fwd.app",
-        "networkIdx": "0",
-        "srcIp": "10.0.1.100",
-        "dstIp": "10.0.2.50",
-        "intent": "PREFER_DELIVERED",
-        ...
-      }
+      "srcIp": "10.0.1.100",
+      "dstIp": "10.0.2.50",
+      "intent": "PREFER_DELIVERED"
     }
   ]
 }
 ```
+
+The file is gitignored — it may contain customer network addressing.
 
 ---
 
@@ -194,7 +222,7 @@ Each tool is a self-contained Python script that:
 
 1. Reads credentials from `FWD_CREDS_*` environment variables
 2. Uses `fwd_discovery.py` to call the Forward Networks API and enumerate available
-   networks and snapshots (no manual config files needed)
+   networks and snapshots — no manual config files needed
 3. Starts a local `http.server` on localhost — no data leaves your machine except
    the API calls you explicitly trigger
 4. Serves a single-page HTML/JS UI with all logic inline
@@ -208,11 +236,13 @@ Each tool is a self-contained Python script that:
 ```
 .
 ├── README.md
-├── path_search_builder.py      # Tool 1: URL builder + live runner
+├── path_search_builder.py      # Tool 1: interactive query builder and runner
 ├── path_search_compare.py      # Tool 2: parameter matrix comparison
 ├── path_search_history.py      # Tool 3: snapshot history audit
+├── path_search_diff.py         # Tool 4: snapshot diff investigator
 ├── fwd_discovery.py            # Shared: network/snapshot discovery via API
-└── path_search_config.json     # Auto-created: saved searches
+├── path_search_config.json     # Auto-created: saved searches (gitignored)
+└── path_diff_filters.json      # Auto-created: noise filter patterns for diff tool
 ```
 
 ---
@@ -232,10 +262,6 @@ The tool couldn't reach the Forward Networks API. Check that:
 - `FWD_BASE_URL` is set correctly if you're not using `https://fwd.app`
 - Your network has internet access or VPN connectivity to the instance
 - The access key and secret key are in `accessKey:secretKey` order (colon-separated)
-
-**Firewalls not appearing in results**
-See [Tip — surfacing firewalls](#tip--surfacing-firewalls) above. The short answer:
-increase `maxCandidates`. Start with `5000`, try `10000` if still not appearing.
 
 ---
 

@@ -268,6 +268,31 @@ def build_urls(base_url, network_id, snapshot_id, src_ip, dst_ip,
     return api_url, search, app_url
 
 
+def extract_hop_device_set(paths, normalize_peers):
+    """
+    Extract the union of all non-synthetic device names across all paths
+    that share the same forwardingOutcome and hop count as the top path.
+    Used for hop-set change detection.
+    """
+    if not paths:
+        return []
+    top = paths[0]
+    top_fo  = top.get("forwardingOutcome", "")
+    top_len = len(top.get("hops", []))
+    names = set()
+    for p in paths:
+        if (p.get("forwardingOutcome") == top_fo and
+                len(p.get("hops", [])) == top_len):
+            for h in p.get("hops", []):
+                name = h.get("deviceName") or h.get("displayName") or ""
+                if name and not any(name.startswith(pfx)
+                                    for pfx in ("internet ", "MPLS-", "MPLS_")):
+                    if normalize_peers:
+                        name = re.sub(r"[-_][a-zA-Z]$", "", name)
+                    names.add(name)
+    return sorted(names)
+
+
 def analyze_snapshot_result(body, normalize_peers):
     """
     Parse a PathSearchResponse and return a summary dict.
@@ -294,6 +319,8 @@ def analyze_snapshot_result(body, normalize_peers):
     max_hops   = max(hop_counts) if hop_counts else 0
     min_hops   = min(hop_counts) if hop_counts else 0
 
+    hop_device_set = extract_hop_device_set(paths, normalize_peers)
+
     # Use totalHits for path count — accurate even when maxResults=1
     total_hits_data = (body.get("info") or {}).get("totalHits") or {}
     total_hits      = total_hits_data.get("value", len(paths))
@@ -311,6 +338,95 @@ def analyze_snapshot_result(body, normalize_peers):
         "outcomes":        outcomes,
         "max_hops":        max_hops,
         "min_hops":        min_hops,
+        "hop_device_set":  hop_device_set,
+    }
+
+
+def _levenshtein_ratio(a, b):
+    """Normalised edit distance: 1.0 = identical, 0.0 = nothing in common."""
+    a, b = a.lower(), b.lower()
+    if a == b:
+        return 1.0
+    la, lb = len(a), len(b)
+    if la == 0 or lb == 0:
+        return 0.0
+    # Standard DP Levenshtein
+    prev_row = list(range(lb + 1))
+    for i, ca in enumerate(a, 1):
+        curr_row = [i]
+        for j, cb in enumerate(b, 1):
+            curr_row.append(min(
+                prev_row[j] + 1,          # deletion
+                curr_row[j - 1] + 1,      # insertion
+                prev_row[j - 1] + (ca != cb),  # substitution
+            ))
+        prev_row = curr_row
+    dist = prev_row[lb]
+    return 1.0 - dist / max(la, lb)
+
+
+FUZZY_SIMILAR_THRESHOLD = 0.6   # names with ratio >= this are "similar peer" changes
+
+
+def diff_hop_sets(prev_set, curr_set):
+    """
+    Compare two device name sets and return a structured diff:
+      {
+        "added":    [names present in curr but not prev],
+        "removed":  [names present in prev but not curr],
+        "similar":  [(removed, added, ratio), ...],  # fuzzy-matched peer swaps
+        "replaced": [(removed, added), ...],          # clear replacements (no fuzzy match)
+        "net_added":   [names in added with no fuzzy match],
+        "net_removed": [names in removed with no fuzzy match],
+      }
+    Similar = ratio >= FUZZY_SIMILAR_THRESHOLD.
+    Each name participates in at most one pairing (greedy best-match).
+    """
+    prev_s = set(prev_set or [])
+    curr_s = set(curr_set or [])
+    added   = sorted(curr_s - prev_s)
+    removed = sorted(prev_s - curr_s)
+
+    if not added or not removed:
+        return {
+            "added": added, "removed": removed,
+            "similar": [], "replaced": [],
+            "net_added": added, "net_removed": removed,
+        }
+
+    # Score all (removed, added) pairs
+    scores = []
+    for r in removed:
+        for a in added:
+            ratio = _levenshtein_ratio(r, a)
+            if ratio >= FUZZY_SIMILAR_THRESHOLD:
+                scores.append((ratio, r, a))
+    scores.sort(reverse=True)
+
+    matched_r, matched_a = set(), set()
+    similar, replaced = [], []
+    for ratio, r, a in scores:
+        if r not in matched_r and a not in matched_a:
+            similar.append((r, a, round(ratio, 2)))
+            matched_r.add(r)
+            matched_a.add(a)
+
+    # Unmatched pairs are genuine replacements
+    unmatched_r = [r for r in removed if r not in matched_r]
+    unmatched_a = [a for a in added   if a not in matched_a]
+    # Pair remaining by position for display (best we can do without context)
+    for i in range(max(len(unmatched_r), len(unmatched_a))):
+        r = unmatched_r[i] if i < len(unmatched_r) else None
+        a = unmatched_a[i] if i < len(unmatched_a) else None
+        replaced.append((r, a))
+
+    return {
+        "added":       added,
+        "removed":     removed,
+        "similar":     similar,
+        "replaced":    replaced,
+        "net_added":   [a for a in added   if a not in matched_a],
+        "net_removed": [r for r in removed if r not in matched_r],
     }
 
 
@@ -319,30 +435,42 @@ def detect_change(prev, curr):
     Compare two analysis dicts and return a change classification string.
 
     Returns one of:
-      NO_CHANGE         — identical firewall set
-      FW_SET_CHANGED    — different firewall devices (meaningful change)
-      FW_APPEARED       — prev had no FW, curr does
-      FW_DISAPPEARED    — prev had FW, curr has none
-      PATH_COUNT_ONLY   — same FW set, different path count (ECMP variation, not flagged)
-      NO_RESULTS        — both have 0 paths
-      BASELINE          — first snapshot, no previous to compare
+      NO_CHANGE          — identical device set and path count
+      FW_SET_CHANGED     — different firewall devices (meaningful change)
+      FW_APPEARED        — prev had no FW, curr does
+      FW_DISAPPEARED     — prev had FW, curr has none
+      HOP_SET_CHANGED    — non-FW device set changed (new/removed hops)
+      HOP_SET_SIMILAR    — device set changed but all diffs are fuzzy peer swaps
+      PATH_COUNT_ONLY    — same device set, different path count (ECMP variation)
+      BASELINE           — first snapshot, no previous to compare
     """
     if prev is None:
         return "BASELINE"
 
-    prev_fp = frozenset(prev["fw_fingerprint"])
-    curr_fp = frozenset(curr["fw_fingerprint"])
+    prev_fp = frozenset(prev.get("fw_fingerprint") or [])
+    curr_fp = frozenset(curr.get("fw_fingerprint") or [])
 
-    if prev_fp == curr_fp:
-        if prev["total_paths"] != curr["total_paths"]:
-            return "PATH_COUNT_ONLY"
-        return "NO_CHANGE"
+    # FW changes take priority
+    if prev_fp != curr_fp:
+        if not prev_fp and curr_fp:
+            return "FW_APPEARED"
+        if prev_fp and not curr_fp:
+            return "FW_DISAPPEARED"
+        return "FW_SET_CHANGED"
 
-    if not prev_fp and curr_fp:
-        return "FW_APPEARED"
-    if prev_fp and not curr_fp:
-        return "FW_DISAPPEARED"
-    return "FW_SET_CHANGED"
+    # Hop-set changes
+    prev_hops = frozenset(prev.get("hop_device_set") or [])
+    curr_hops = frozenset(curr.get("hop_device_set") or [])
+    if prev_hops != curr_hops and prev_hops and curr_hops:
+        hop_diff = diff_hop_sets(list(prev_hops), list(curr_hops))
+        # If every change has a fuzzy peer match, it's SIMILAR (warn-level)
+        if hop_diff["replaced"] or hop_diff["net_added"] or hop_diff["net_removed"]:
+            return "HOP_SET_CHANGED"
+        return "HOP_SET_SIMILAR"
+
+    if prev.get("total_paths") != curr.get("total_paths"):
+        return "PATH_COUNT_ONLY"
+    return "NO_CHANGE"
 
 
 HTML = r"""<!DOCTYPE html>
@@ -440,14 +568,16 @@ HTML = r"""<!DOCTYPE html>
 
   /* Left gutter: status color bar */
   .tl-gutter { width:5px; flex-shrink:0; }
-  .tl-gutter.no-change      { background:var(--muted); }
-  .tl-gutter.fw-set-changed { background:var(--error); }
-  .tl-gutter.fw-appeared    { background:var(--accent); }
-  .tl-gutter.fw-disappeared { background:var(--error); }
-  .tl-gutter.path-count-only{ background:var(--muted); }
-  .tl-gutter.baseline       { background:var(--accent2); }
-  .tl-gutter.error          { background:var(--warn); }
-  .tl-gutter.no-results     { background:var(--muted); }
+  .tl-gutter.no-change       { background:var(--muted); }
+  .tl-gutter.fw-set-changed  { background:var(--error); }
+  .tl-gutter.fw-appeared     { background:var(--accent); }
+  .tl-gutter.fw-disappeared  { background:var(--error); }
+  .tl-gutter.hop-set-changed { background:var(--warn); }
+  .tl-gutter.hop-set-similar { background:var(--accent2); opacity:0.7; }
+  .tl-gutter.path-count-only { background:var(--muted); }
+  .tl-gutter.baseline        { background:var(--accent2); }
+  .tl-gutter.error           { background:var(--warn); }
+  .tl-gutter.no-results      { background:var(--muted); }
 
   .tl-body { flex:1; padding:10px 14px; background:var(--surface); }
   .tl-header { display:flex; align-items:center; gap:10px; margin-bottom:6px; flex-wrap:wrap; }
@@ -456,9 +586,10 @@ HTML = r"""<!DOCTYPE html>
 
   .badge { display:inline-block; font-size:0.62rem; font-weight:700; padding:2px 8px; border-radius:3px; white-space:nowrap; }
   .badge-ok    { background:var(--success); color:var(--bg); }
-  .badge-err   { background:var(--error);   color:var(--bg); }
-  .badge-warn  { background:var(--warn);    color:var(--bg); }
-  .badge-info  { background:var(--accent);  color:var(--bg); }
+  .badge-err    { background:var(--error);   color:var(--bg); }
+  .badge-warn   { background:var(--warn);    color:var(--bg); }
+  .badge-info   { background:var(--accent);  color:var(--bg); }
+  .badge-peer   { background:var(--accent2); color:var(--bg); }
   .badge-muted { background:var(--border);  color:var(--muted); }
   .badge-accent2{ background:#1a3a45; color:var(--accent2); border:1px solid var(--accent2); }
 
@@ -472,11 +603,17 @@ HTML = r"""<!DOCTYPE html>
   .tl-meta a:hover { text-decoration:underline; }
 
   .tl-change-note { font-size:0.7rem; margin-top:4px; }
-  .change-fw-set   { color:var(--error); font-weight:700; }
-  .change-appeared { color:var(--accent); font-weight:700; }
-  .change-gone     { color:var(--error); font-weight:700; }
-  .change-count    { color:var(--muted); }
-  .change-baseline { color:var(--accent2); }
+  .change-fw-set      { color:var(--error); font-weight:700; }
+  .change-appeared    { color:var(--accent); font-weight:700; }
+  .change-gone        { color:var(--error); font-weight:700; }
+  .change-hop-changed { color:var(--warn); font-weight:700; }
+  .change-hop-similar { color:var(--accent2); }
+  .change-count       { color:var(--muted); }
+  .change-baseline    { color:var(--accent2); }
+  .hop-change-peer    { font-size:0.68rem; color:var(--accent2); font-style:italic; }
+  .hop-change-replace { font-size:0.68rem; color:var(--warn); }
+  .hop-change-remove  { font-size:0.68rem; color:var(--error); }
+  .hop-change-add     { font-size:0.68rem; color:var(--success); }
 
   /* Summary bar */
   .summary-bar {
@@ -1065,30 +1202,97 @@ function setProgress(done, total, label) {
 }
 
 // ── Client-side change detection (mirrors Python logic) ───────────────────────
+const FUZZY_THRESHOLD = 0.6;
+
+function levenshteinRatio(a, b) {
+  a = a.toLowerCase(); b = b.toLowerCase();
+  if (a === b) return 1.0;
+  const la = a.length, lb = b.length;
+  if (!la || !lb) return 0.0;
+  let prev = Array.from({length: lb + 1}, (_, i) => i);
+  for (let i = 1; i <= la; i++) {
+    const curr = [i];
+    for (let j = 1; j <= lb; j++) {
+      curr.push(Math.min(
+        prev[j] + 1,
+        curr[j - 1] + 1,
+        prev[j - 1] + (a[i-1] !== b[j-1] ? 1 : 0)
+      ));
+    }
+    prev = curr;
+  }
+  return 1.0 - prev[lb] / Math.max(la, lb);
+}
+
+function diffHopSets(prevSet, currSet) {
+  const ps = new Set(prevSet || []);
+  const cs = new Set(currSet || []);
+  const added   = [...cs].filter(x => !ps.has(x)).sort();
+  const removed = [...ps].filter(x => !cs.has(x)).sort();
+  if (!added.length || !removed.length) {
+    return { added, removed, similar: [], replaced: [], netAdded: added, netRemoved: removed };
+  }
+  const scores = [];
+  for (const r of removed) for (const a of added) {
+    const ratio = levenshteinRatio(r, a);
+    if (ratio >= FUZZY_THRESHOLD) scores.push({ ratio, r, a });
+  }
+  scores.sort((x, y) => y.ratio - x.ratio);
+  const matchedR = new Set(), matchedA = new Set();
+  const similar = [], replaced = [];
+  for (const { ratio, r, a } of scores) {
+    if (!matchedR.has(r) && !matchedA.has(a)) {
+      similar.push({ removed: r, added: a, ratio: Math.round(ratio * 100) / 100 });
+      matchedR.add(r); matchedA.add(a);
+    }
+  }
+  const unmR = removed.filter(r => !matchedR.has(r));
+  const unmA = added.filter(a => !matchedA.has(a));
+  for (let i = 0; i < Math.max(unmR.length, unmA.length); i++) {
+    replaced.push({ removed: unmR[i] || null, added: unmA[i] || null });
+  }
+  return {
+    added, removed, similar, replaced,
+    netAdded:   added.filter(a => !matchedA.has(a)),
+    netRemoved: removed.filter(r => !matchedR.has(r)),
+  };
+}
+
 function detectChange(prev, curr) {
-  if (!prev)                    return 'BASELINE';
-  if (!curr)                    return 'error';
+  if (!prev) return 'BASELINE';
+  if (!curr)  return 'error';
   const pf = new Set(prev.fw_fingerprint || []);
   const cf = new Set(curr.fw_fingerprint || []);
-  const eq = pf.size === cf.size && [...pf].every(v => cf.has(v));
-  if (eq) {
-    return prev.total_paths !== curr.total_paths ? 'PATH_COUNT_ONLY' : 'NO_CHANGE';
+  const fwEq = pf.size === cf.size && [...pf].every(v => cf.has(v));
+  if (!fwEq) {
+    if (pf.size === 0 && cf.size > 0) return 'FW_APPEARED';
+    if (pf.size > 0 && cf.size === 0) return 'FW_DISAPPEARED';
+    return 'FW_SET_CHANGED';
   }
-  if (pf.size === 0 && cf.size > 0) return 'FW_APPEARED';
-  if (pf.size > 0 && cf.size === 0) return 'FW_DISAPPEARED';
-  return 'FW_SET_CHANGED';
+  const ph = new Set(prev.hop_device_set || []);
+  const ch = new Set(curr.hop_device_set || []);
+  const hopEq = ph.size === ch.size && [...ph].every(v => ch.has(v));
+  if (!hopEq && ph.size > 0 && ch.size > 0) {
+    const d = diffHopSets([...ph], [...ch]);
+    if (d.replaced.length || d.netAdded.length || d.netRemoved.length)
+      return 'HOP_SET_CHANGED';
+    return 'HOP_SET_SIMILAR';
+  }
+  return prev.total_paths !== curr.total_paths ? 'PATH_COUNT_ONLY' : 'NO_CHANGE';
 }
 
 // ── Timeline rendering ────────────────────────────────────────────────────────
 const CHANGE_META = {
-  NO_CHANGE:       { gutterClass:'no-change',      badge:'<span class="badge badge-muted">— no change</span>' },
-  FW_SET_CHANGED:  { gutterClass:'fw-set-changed', badge:'<span class="badge badge-err">⚠ FW set changed</span>' },
-  FW_APPEARED:     { gutterClass:'fw-appeared',    badge:'<span class="badge badge-info">↑ FW appeared</span>' },
-  FW_DISAPPEARED:  { gutterClass:'fw-disappeared', badge:'<span class="badge badge-err">↓ FW disappeared</span>' },
-  PATH_COUNT_ONLY: { gutterClass:'path-count-only',badge:'<span class="badge badge-muted">~ path count only</span>' },
-  BASELINE:        { gutterClass:'baseline',        badge:'<span class="badge badge-accent2">● baseline</span>' },
-  error:           { gutterClass:'error',            badge:'<span class="badge badge-warn">⚠ error</span>' },
-  NO_RESULTS:      { gutterClass:'no-results',       badge:'<span class="badge badge-muted">— no results</span>' },
+  NO_CHANGE:        { gutterClass:'no-change',       badge:'<span class="badge badge-muted">— no change</span>' },
+  FW_SET_CHANGED:   { gutterClass:'fw-set-changed',  badge:'<span class="badge badge-err">⚠ FW set changed</span>' },
+  FW_APPEARED:      { gutterClass:'fw-appeared',     badge:'<span class="badge badge-info">↑ FW appeared</span>' },
+  FW_DISAPPEARED:   { gutterClass:'fw-disappeared',  badge:'<span class="badge badge-err">↓ FW disappeared</span>' },
+  HOP_SET_CHANGED:  { gutterClass:'hop-set-changed', badge:'<span class="badge badge-warn">⚠ path hops changed</span>' },
+  HOP_SET_SIMILAR:  { gutterClass:'hop-set-similar', badge:'<span class="badge badge-peer">~ peer swap</span>' },
+  PATH_COUNT_ONLY:  { gutterClass:'path-count-only', badge:'<span class="badge badge-muted">~ path count only</span>' },
+  BASELINE:         { gutterClass:'baseline',         badge:'<span class="badge badge-accent2">● baseline</span>' },
+  error:            { gutterClass:'error',             badge:'<span class="badge badge-warn">⚠ error</span>' },
+  NO_RESULTS:       { gutterClass:'no-results',        badge:'<span class="badge badge-muted">— no results</span>' },
 };
 
 function appendTimelineRow(row, isFirst, isLast) {
@@ -1099,11 +1303,13 @@ function appendTimelineRow(row, isFirst, isLast) {
   const meta     = CHANGE_META[change] || CHANGE_META['error'];
   const rowId    = `row-${snap.id}`;
 
-  // FW device tags — compare to the nearest previous non-error row
+  // FW device tags + hop diff — compare to the nearest previous non-error row
   let prevFp = new Set();
+  let prevAnalysis = null;
   for (let j = allRows.length - 2; j >= 0; j--) {
     if (allRows[j].analysis && !allRows[j].error) {
-      prevFp = new Set(allRows[j].analysis.fw_fingerprint || []);
+      prevAnalysis = allRows[j].analysis;
+      prevFp = new Set(prevAnalysis.fw_fingerprint || []);
       break;
     }
   }
@@ -1133,6 +1339,28 @@ function appendTimelineRow(row, isFirst, isLast) {
     changeNote = `<div class="tl-change-note change-appeared">↑ Firewall hops newly visible in this snapshot</div>`;
   else if (change === 'FW_DISAPPEARED')
     changeNote = `<div class="tl-change-note change-gone">↓ Firewall hops missing — were visible in previous snapshot</div>`;
+  else if (change === 'HOP_SET_CHANGED' || change === 'HOP_SET_SIMILAR') {
+    const prevHops = new Set((prevAnalysis ? prevAnalysis.hop_device_set : null) || []);
+    const currHops = new Set(analysis.hop_device_set || []);
+    const d = diffHopSets([...prevHops], [...currHops]);
+    const noteCls = change === 'HOP_SET_SIMILAR' ? 'change-hop-similar' : 'change-hop-changed';
+    const notePrefix = change === 'HOP_SET_SIMILAR'
+      ? '~ Path hops changed (likely peer swap)'
+      : '⚠ Path hops changed';
+    let parts = [];
+    d.similar.forEach(s => {
+      parts.push(`<span class="hop-change-peer">${esc(s.removed)} → ${esc(s.added)}</span>`);
+    });
+    d.replaced.forEach(r => {
+      if (r.removed && r.added)
+        parts.push(`<span class="hop-change-replace">${esc(r.removed)} → ${esc(r.added)}</span>`);
+      else if (r.removed)
+        parts.push(`<span class="hop-change-remove">− ${esc(r.removed)}</span>`);
+      else if (r.added)
+        parts.push(`<span class="hop-change-add">+ ${esc(r.added)}</span>`);
+    });
+    changeNote = `<div class="tl-change-note ${noteCls}">${notePrefix}${parts.length ? ': ' + parts.join(', ') : ''}</div>`;
+  }
   else if (change === 'PATH_COUNT_ONLY')
     changeNote = `<div class="tl-change-note change-count">Path count changed (${analysis.total_paths||0} paths) — same device set, likely ECMP variation</div>`;
   else if (change === 'BASELINE')
@@ -1289,7 +1517,7 @@ function buildSummary() {
   const total   = allRows.length;
   const withFw  = allRows.filter(r => !r.error && r.analysis && r.analysis.has_fw).length;
   const noFw    = allRows.filter(r => !r.error && r.analysis && !r.analysis.has_fw).length;
-  const changes = allRows.filter(r => ['FW_SET_CHANGED','FW_APPEARED','FW_DISAPPEARED'].includes(r.change)).length;
+  const changes = allRows.filter(r => ['FW_SET_CHANGED','FW_APPEARED','FW_DISAPPEARED','HOP_SET_CHANGED'].includes(r.change)).length;
   const ecmp    = allRows.filter(r => r.change === 'PATH_COUNT_ONLY').length;
   const errors  = allRows.filter(r => r.error || (r.analysis?.timed_out && !r.analysis?.total_paths)).length;
 
