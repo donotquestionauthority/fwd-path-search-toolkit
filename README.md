@@ -162,6 +162,7 @@ Watchlist-based regression monitor for tracking resolved issues.
 ---
 
 ## Security
+This tool is intended for individual use with your own API credentials against a Forward Networks instance you have authorized access to. How you supply and store those credentials is your choice and should follow your organization's policies.
 
 - Credentials are read from environment variables at startup, or prompted at runtime
 - Credentials entered at runtime are held in memory only — never written to disk by the application
