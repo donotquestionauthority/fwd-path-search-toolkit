@@ -165,7 +165,10 @@ def collect_credentials(credentials_dict, args, discovery_fn):
             print("  ⚠  No credentials loaded from keychain. Exiting.\n")
             sys.exit(1)
     else:
-        base_url = os.environ.get("FWD_BASE_URL", "https://fwd.app")
+        if args["instance"]:
+            base_url = f"https://{args['instance']}"
+        else:
+            base_url = os.environ.get("FWD_BASE_URL", "https://fwd.app")
         found = load_credentials_from_env(credentials_dict)
         if found == 0:
             prompt_for_credentials(credentials_dict)
