@@ -326,6 +326,14 @@ def run():
         for k in os.environ:
             if k.startswith("FWD_CREDS_"):
                 found += 1
+
+        # Determine base URL — --instance takes priority over FWD_BASE_URL env var
+        if args["instance"]:
+            base_url = f"https://{args['instance']}"
+        else:
+            base_url = os.environ.get("FWD_BASE_URL", "https://fwd.app")
+        extra_env["FWD_BASE_URL"] = base_url
+
         if found == 0:
             tmp_creds = {}
             helpers.prompt_for_credentials(tmp_creds)
@@ -333,8 +341,6 @@ def run():
             for net_id, auth_header in tmp_creds.items():
                 raw = base64.b64decode(auth_header.split(" ", 1)[1]).decode()
                 extra_env[f"FWD_CREDS_{net_id}"] = raw
-            base_url = os.environ.get("FWD_BASE_URL", "https://fwd.app")
-            extra_env["FWD_BASE_URL"] = base_url
         else:
             print(f"  ✓  {found} FWD_CREDS_* variable(s) found in environment.")
 
