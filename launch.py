@@ -321,17 +321,22 @@ def run():
         print(f"\n  ✓  Credentials for {found} network(s) ready for injection.")
     else:
         # Non-keychain path — tools will read FWD_CREDS_* from env themselves
-        # or fall back to interactive prompt (not ideal in launcher context)
+        # Check env vars — if none found, prompt interactively
         found = 0
         for k in os.environ:
             if k.startswith("FWD_CREDS_"):
                 found += 1
         if found == 0:
-            print("  ⚠  No FWD_CREDS_* environment variables found.")
-            print("     Use --keychain --instance <host> --network <id> for keychain auth,")
-            print("     or set FWD_CREDS_<networkId> environment variables before launching.\n")
-            sys.exit(1)
-        print(f"  ✓  {found} FWD_CREDS_* variable(s) found in environment.")
+            tmp_creds = {}
+            helpers.prompt_for_credentials(tmp_creds)
+            import base64
+            for net_id, auth_header in tmp_creds.items():
+                raw = base64.b64decode(auth_header.split(" ", 1)[1]).decode()
+                extra_env[f"FWD_CREDS_{net_id}"] = raw
+            base_url = os.environ.get("FWD_BASE_URL", "https://fwd.app")
+            extra_env["FWD_BASE_URL"] = base_url
+        else:
+            print(f"  ✓  {found} FWD_CREDS_* variable(s) found in environment.")
 
     launch_tools(extra_env=extra_env if extra_env else None)
 
