@@ -39,6 +39,7 @@ DEFAULT_CONFIG = {"networks": [], "savedSearches": []}
 
 # In-memory credentials store: { networkId: "Basic base64string" }
 CREDENTIALS = {}
+BASE_URL    = "https://fwd.app"
 # Discovered networks: [{ id, name, snapshots: [{id, label, timestamp}] }]
 NETWORKS_DATA = []
 
@@ -702,6 +703,13 @@ async function boot() {
     const r = await fetch('/config');
     const c = await r.json();
     config.savedSearches = c.savedSearches || [];
+  } catch(e) {}
+
+  // Pre-populate base URL from server (reflects --instance flag or env var)
+  try {
+    const r = await fetch('/instance-url');
+    const d = await r.json();
+    if (d.baseUrl) document.getElementById('base').value = d.baseUrl;
   } catch(e) {}
 
   // Load live network/snapshot data from API discovery
@@ -1836,6 +1844,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             body = json.dumps(data).encode('utf-8')
             self._respond(200, 'application/json', body)
 
+        elif self.path == '/instance-url':
+            body = json.dumps({'baseUrl': BASE_URL}).encode('utf-8')
+            self._respond(200, 'application/json', body)
+
         elif self.path == '/credentialed':
             body = json.dumps({'networkIds': list(CREDENTIALS.keys())}).encode('utf-8')
             self._respond(200, 'application/json', body)
@@ -1930,9 +1942,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def run():
     print(f'\n  ⬡  Forward Networks — Path Search URL Builder')
     print(f'  ' + '─' * 50)
-    global NETWORKS_DATA
+    global NETWORKS_DATA, BASE_URL
     args = _helpers.parse_args()
-    base_url, NETWORKS_DATA = _helpers.collect_credentials(
+    BASE_URL, NETWORKS_DATA = _helpers.collect_credentials(
         CREDENTIALS, args, _load_discovery().discover_all)
 
     server = http.server.HTTPServer(('127.0.0.1', PORT), Handler)

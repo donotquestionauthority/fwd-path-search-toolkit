@@ -36,6 +36,7 @@ _helpers = _load_helpers()
 
 PORT        = 8767
 CREDENTIALS   = {}
+BASE_URL      = "https://fwd.app"
 NETWORKS_DATA = []
 CONFIG_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "path_search_config.json")
 
@@ -870,6 +871,11 @@ let savedSearches = [];
 
 async function boot() {
   try {
+    const r = await fetch('/instance-url');
+    const d = await r.json();
+    if (d.baseUrl) document.getElementById('base-url').value = d.baseUrl;
+  } catch(e) {}
+  try {
     const r    = await fetch('/networks-data');
     const data = await r.json();
     discoveredNetworks   = Array.isArray(data) ? data : (data.networks || []);
@@ -1579,6 +1585,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path == '/networks-data':
             body = json.dumps(NETWORKS_DATA).encode('utf-8')
             self._respond(200, 'application/json', body)
+        elif self.path == '/instance-url':
+            body = json.dumps({'baseUrl': BASE_URL}).encode('utf-8')
+            self._respond(200, 'application/json', body)
         elif self.path == '/config':
             body = json.dumps(read_config()).encode('utf-8')
             self._respond(200, 'application/json', body)
@@ -1693,9 +1702,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def run():
     print('\n  ⬡  Forward Networks — Path Search History Tool')
     print('  ' + '─' * 50)
-    global NETWORKS_DATA
+    global NETWORKS_DATA, BASE_URL
     args = _helpers.parse_args()
-    base_url, NETWORKS_DATA = _helpers.collect_credentials(
+    BASE_URL, NETWORKS_DATA = _helpers.collect_credentials(
         CREDENTIALS, args, _load_discovery().discover_all)
 
     server = http.server.HTTPServer(('127.0.0.1', PORT), Handler)

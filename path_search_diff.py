@@ -46,6 +46,7 @@ _helpers = _load_helpers()
 PORT          = 8768
 CREDENTIALS   = {}
 NETWORKS_DATA = []
+BASE_URL      = "https://fwd.app"
 CONFIG_FILE   = os.path.join(os.path.dirname(os.path.abspath(__file__)), "path_search_config.json")
 FILTERS_FILE  = os.path.join(os.path.dirname(os.path.abspath(__file__)), "path_diff_filters.json")
 
@@ -1648,7 +1649,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _handle_run_diff(self, raw):
         try:
             req      = json.loads(raw)
-            base_url = os.environ.get('FWD_BASE_URL', 'https://fwd.app')
+            base_url = BASE_URL
             net_id   = req['networkId']
             snap_w   = req['snapWorking']
             snap_b   = req['snapBroken']
@@ -1756,7 +1757,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         params      = urllib.parse.parse_qs(qs)
         def qp(k, default=None): v = params.get(k); return v[0] if v else default
 
-        base_url    = os.environ.get('FWD_BASE_URL', 'https://fwd.app')
+        base_url    = BASE_URL
         net_id      = qp('networkId', '')
         snap_w      = qp('snapWorking', '')
         snap_b      = qp('snapBroken', '')
@@ -1907,7 +1908,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _handle_analyze_device(self, raw):
         try:
             req         = json.loads(raw)
-            base_url    = os.environ.get('FWD_BASE_URL', 'https://fwd.app')
+            base_url    = BASE_URL
             net_id      = req['networkId']
             device_name = req['deviceName']
             snap_w      = req['snapWorking']
@@ -1979,10 +1980,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def run():
     print('\n  \u2b61  Forward Networks \u2014 Path Search Diff Tool')
     print('  ' + '\u2500' * 50)
-    global NETWORKS_DATA
+    global NETWORKS_DATA, BASE_URL
     args = _helpers.parse_args()
     _ensure_filters_file()
-    base_url, NETWORKS_DATA = _helpers.collect_credentials(
+    BASE_URL, NETWORKS_DATA = _helpers.collect_credentials(
         CREDENTIALS, args, _load_discovery().discover_all)
 
     server = http.server.HTTPServer(('127.0.0.1', PORT), Handler)
