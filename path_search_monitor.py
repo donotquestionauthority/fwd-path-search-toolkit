@@ -22,6 +22,15 @@ import http.server
 from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+def _load_helpers():
+    import importlib.util as _ilu
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fwd_helpers.py")
+    _s = _ilu.spec_from_file_location("fwd_helpers", _p)
+    _m = _ilu.module_from_spec(_s); _s.loader.exec_module(_m)
+    return _m
+_helpers = _load_helpers()
+
+
 PORT         = 8769
 MONITOR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "path_search_monitor.json")
 FIREWALL_TYPES = {"FIREWALL", "AWS_NETWORK_FIREWALL", "AZURE_FIREWALL"}
@@ -43,74 +52,6 @@ def _load_discovery():
     mod  = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
-
-
-
-def _prompt_for_credentials():
-    """Prompt operator for network ID and credentials at runtime.
-    Called when no FWD_CREDS_* environment variables are found.
-    Credentials are held in memory only — never written to disk.
-    """
-    import getpass
-    print("  No FWD_CREDS_* environment variables found.")
-    print("  Enter credentials manually (held in memory for this session only).\n")
-    while True:
-        net_id = input("  Network ID (leave blank to finish): ").strip()
-        if not net_id:
-            break
-        access_key = input(f"  Access key for network {net_id}: ").strip()
-        secret_key = getpass.getpass(f"  Secret key for network {net_id}: ")
-        if access_key and secret_key:
-            val   = f"{access_key}:{secret_key}"
-            token = base64.b64encode(val.encode()).decode()
-            CREDENTIALS[net_id] = f"Basic {token}"
-            print(f"  ✓  Network {net_id} credential stored.\n")
-        else:
-            print("  ⚠  Both access key and secret key are required. Try again.\n")
-    if not CREDENTIALS:
-        print("  ⚠  No credentials entered. Exiting.\n")
-        sys.exit(1)
-
-
-def collect_credentials(base_url):
-    global NETWORKS_DATA, BASE_URL, JIRA_BASE_URL, EVIDENCE_DIR
-    BASE_URL      = base_url
-    JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
-    EVIDENCE_DIR  = os.environ.get("EVIDENCE_DIR", "").strip()
-
-    prefix = "FWD_CREDS_"
-    found  = 0
-    for k, v in os.environ.items():
-        if k.startswith(prefix):
-            net_id = k[len(prefix):]
-            token  = base64.b64encode(v.encode()).decode()
-            CREDENTIALS[net_id] = f"Basic {token}"
-            found += 1
-    if found == 0:
-        _prompt_for_credentials()
-    print(f"  ✓  {found} network credential(s) loaded.")
-    if JIRA_BASE_URL:
-        print(f"  ✓  Jira base URL: {JIRA_BASE_URL}")
-    else:
-        print("  ⚠  JIRA_BASE_URL not set — Jira IDs will not be hyperlinked.")
-    if EVIDENCE_DIR:
-        os.makedirs(EVIDENCE_DIR, exist_ok=True)
-        print(f"  ✓  Evidence directory: {EVIDENCE_DIR}")
-    else:
-        print("  ⚠  EVIDENCE_DIR not set — archived evidence will save to working directory.")
-    print("  Discovering networks and snapshots...\n")
-    try:
-        disc = _load_discovery()
-        NETWORKS_DATA = disc.discover_all(base_url, CREDENTIALS)
-        print()
-    except Exception as e:
-        print(f"  ⚠  Discovery failed: {e}\n")
-        NETWORKS_DATA = [{"id": nid, "name": nid, "snapshots": []} for nid in CREDENTIALS]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Config persistence
-# ─────────────────────────────────────────────────────────────────────────────
 
 def read_monitor_data():
     if not os.path.exists(MONITOR_FILE):
@@ -1439,12 +1380,28 @@ boot();
 def run():
     print("\n  ⬡  Forward Networks — Path Search Monitor")
     print("  " + "─" * 50)
-    base_url = os.environ.get("FWD_BASE_URL", "https://fwd.app")
-    collect_credentials(base_url)
+    global NETWORKS_DATA, BASE_URL, JIRA_BASE_URL, EVIDENCE_DIR
+    args = _helpers.parse_args()
+
+    # Non-secret config from environment
+    JIRA_BASE_URL = os.environ.get("JIRA_BASE_URL", "").rstrip("/")
+    EVIDENCE_DIR  = os.environ.get("EVIDENCE_DIR", "").strip()
+    if JIRA_BASE_URL:
+        print(f"  ✓  Jira base URL: {JIRA_BASE_URL}")
+    else:
+        print("  ⚠  JIRA_BASE_URL not set — Jira IDs will not be hyperlinked.")
+    if EVIDENCE_DIR:
+        os.makedirs(EVIDENCE_DIR, exist_ok=True)
+        print(f"  ✓  Evidence directory: {EVIDENCE_DIR}")
+    else:
+        print("  ⚠  EVIDENCE_DIR not set — archived evidence will save to working directory.")
+
+    BASE_URL, NETWORKS_DATA = _helpers.collect_credentials(
+        CREDENTIALS, args, _load_discovery().discover_all)
 
     server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
 
-    if "--no-browser" not in sys.argv:
+    if not args["no_browser"]:
         def open_browser():
             time.sleep(0.4)
             webbrowser.open(f"http://localhost:{PORT}")

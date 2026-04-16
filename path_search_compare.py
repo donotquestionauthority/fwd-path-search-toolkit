@@ -20,6 +20,15 @@ import base64
 import time
 import importlib.util
 
+def _load_helpers():
+    import importlib.util as _ilu
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fwd_helpers.py")
+    _s = _ilu.spec_from_file_location("fwd_helpers", _p)
+    _m = _ilu.module_from_spec(_s); _s.loader.exec_module(_m)
+    return _m
+_helpers = _load_helpers()
+
+
 PORT = 8766
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "path_search_config.json")
 
@@ -44,57 +53,6 @@ def read_config():
     except Exception:
         return {"networks": [], "savedSearches": []}
 
-
-def collect_credentials(base_url="https://fwd.app"):
-    global NETWORKS_DATA
-    prefix = "FWD_CREDS_"
-    found  = 0
-    for k, v in os.environ.items():
-        if k.startswith(prefix):
-            net_id = k[len(prefix):]
-            token  = base64.b64encode(v.encode()).decode()
-            CREDENTIALS[net_id] = f"Basic {token}"
-            found += 1
-    if found == 0:
-        _prompt_for_credentials()
-        return
-    print(f"  ✓ {found} network credential(s) loaded from environment.")
-    print("  Discovering networks and snapshots...\n")
-    try:
-        disc = _load_discovery()
-        NETWORKS_DATA = disc.discover_all(base_url, CREDENTIALS)
-        print()
-    except Exception as e:
-        print(f"  ⚠  Discovery failed: {e}\n")
-        NETWORKS_DATA = [{"id": nid, "name": nid, "snapshots": []}
-                         for nid in CREDENTIALS]
-
-
-
-def _prompt_for_credentials():
-    """Prompt operator for network ID and credentials at runtime.
-    Called when no FWD_CREDS_* environment variables are found.
-    Credentials are held in memory only — never written to disk.
-    """
-    import getpass
-    print("  No FWD_CREDS_* environment variables found.")
-    print("  Enter credentials manually (held in memory for this session only).\n")
-    while True:
-        net_id = input("  Network ID (leave blank to finish): ").strip()
-        if not net_id:
-            break
-        access_key = input(f"  Access key for network {net_id}: ").strip()
-        secret_key = getpass.getpass(f"  Secret key for network {net_id}: ")
-        if access_key and secret_key:
-            val   = f"{access_key}:{secret_key}"
-            token = base64.b64encode(val.encode()).decode()
-            CREDENTIALS[net_id] = f"Basic {token}"
-            print(f"  ✓  Network {net_id} credential stored.\n")
-        else:
-            print("  ⚠  Both access key and secret key are required. Try again.\n")
-    if not CREDENTIALS:
-        print("  ⚠  No credentials entered. Exiting.\n")
-        sys.exit(1)
 def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
                     intent, max_candidates, ip_proto, dst_port, max_seconds=300):
     """Run a single path search and return (status, body, elapsed_ms)."""
@@ -840,12 +798,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
 def run():
     print('\n  ⬡  Forward Networks — Path Search Comparison Tool')
     print('  ' + '─' * 50)
-    base_url = os.environ.get('FWD_BASE_URL', 'https://fwd.app')
-    collect_credentials(base_url)
+    global NETWORKS_DATA
+    args = _helpers.parse_args()
+    base_url, NETWORKS_DATA = _helpers.collect_credentials(
+        CREDENTIALS, args, _load_discovery().discover_all)
 
     server = http.server.HTTPServer(('127.0.0.1', PORT), Handler)
 
-    if '--no-browser' not in sys.argv:
+    if not args['no_browser']:
         def open_browser():
             time.sleep(0.4)
             webbrowser.open(f'http://localhost:{PORT}')

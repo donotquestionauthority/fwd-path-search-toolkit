@@ -57,8 +57,22 @@ TOOLS = [
 _processes: dict[int, subprocess.Popen] = {}
 
 
-def launch_tools():
+def _load_helpers():
+    import importlib.util as _ilu
+    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fwd_helpers.py")
+    _s = _ilu.spec_from_file_location("fwd_helpers", _p)
+    _m = _ilu.module_from_spec(_s); _s.loader.exec_module(_m)
+    return _m
+
+
+def launch_tools(extra_env=None):
+    """Start all tool subprocesses.
+    extra_env: dict of additional environment variables to inject (e.g. credentials).
+    """
     script_dir = os.path.dirname(os.path.abspath(__file__))
+    env = os.environ.copy()
+    if extra_env:
+        env.update(extra_env)
     for tool in TOOLS:
         script = os.path.join(script_dir, tool["script"])
         if not os.path.exists(script):
@@ -67,6 +81,7 @@ def launch_tools():
         proc = subprocess.Popen(
             [sys.executable, script, '--no-browser'],
             cwd=script_dir,
+            env=env,
         )
         _processes[tool["port"]] = proc
         print(f"  ✓  Started {tool['name']} (port {tool['port']}, pid {proc.pid})")
@@ -273,7 +288,52 @@ def run():
     print("\n  ⬡  Forward Networks — Path Search Toolkit Launcher")
     print("  " + "─" * 50)
 
-    launch_tools()
+    helpers = _load_helpers()
+    args    = helpers.parse_args()
+
+    extra_env = {}
+
+    if args["use_keychain"]:
+        if not args["instance"]:
+            print("  ⚠  --keychain requires --instance <hostname>  e.g. --instance fwd.app\n")
+            sys.exit(1)
+        if not args["network_ids"]:
+            print("  ⚠  --keychain requires at least one --network <id>\n")
+            sys.exit(1)
+
+        # Load credentials from keychain into a temporary dict
+        tmp_creds = {}
+        found = helpers.load_credentials_from_keychain(tmp_creds, args["instance"], args["network_ids"])
+        if found == 0:
+            print("  ⚠  No credentials loaded from keychain. Exiting.\n")
+            sys.exit(1)
+
+        # Inject as FWD_CREDS_* env vars — each tool reads these on startup
+        # Decode the Basic token back to raw value for env var format
+        import base64
+        for net_id, auth_header in tmp_creds.items():
+            # auth_header is "Basic <base64(accessKey:secretKey)>"
+            raw = base64.b64decode(auth_header.split(" ", 1)[1]).decode()
+            extra_env[f"FWD_CREDS_{net_id}"] = raw
+
+        # Inject base URL so tools know which instance to talk to
+        extra_env["FWD_BASE_URL"] = f"https://{args['instance']}"
+        print(f"\n  ✓  Credentials for {found} network(s) ready for injection.")
+    else:
+        # Non-keychain path — tools will read FWD_CREDS_* from env themselves
+        # or fall back to interactive prompt (not ideal in launcher context)
+        found = 0
+        for k in os.environ:
+            if k.startswith("FWD_CREDS_"):
+                found += 1
+        if found == 0:
+            print("  ⚠  No FWD_CREDS_* environment variables found.")
+            print("     Use --keychain --instance <host> --network <id> for keychain auth,")
+            print("     or set FWD_CREDS_<networkId> environment variables before launching.\n")
+            sys.exit(1)
+        print(f"  ✓  {found} FWD_CREDS_* variable(s) found in environment.")
+
+    launch_tools(extra_env=extra_env if extra_env else None)
 
     server = http.server.HTTPServer(("127.0.0.1", HOME_PORT), HomeHandler)
 
