@@ -812,7 +812,7 @@ def run():
     BASE_URL, NETWORKS_DATA = _helpers.collect_credentials(
         CREDENTIALS, args, _load_discovery().discover_all)
 
-    server = http.server.HTTPServer(('127.0.0.1', PORT), Handler)
+    server = _helpers.ToolkitServer(('127.0.0.1', PORT), Handler)
 
     if not args['no_browser']:
         def open_browser():

@@ -880,6 +880,7 @@ HTML = r"""<!DOCTYPE html>
 let discoveredNetworks   = [];
 let credentialedNetworks = new Set();
 let stopped = false;
+let abortController = null;   // aborts all in-flight /run-search-snap fetches when Stop is pressed
 let allRows = [];   // { snapshot, analysis, change, elapsed_ms }
 
 // ── Boot ──────────────────────────────────────────────────────────────────────
@@ -1095,6 +1096,7 @@ async function runHistory() {
   if (!srcIp || !dstIp) { alert('srcIp and dstIp are required.'); return; }
 
   stopped = false; allRows = [];
+  abortController = new AbortController();
   document.getElementById('run-btn').disabled    = true;
   document.getElementById('stop-btn').disabled   = false;
   document.getElementById('export-btn').disabled = true;
@@ -1193,13 +1195,20 @@ async function runHistory() {
           ipProto: ipProto ? parseInt(ipProto) : null,
           dstPort: dstPort ? parseInt(dstPort) : null,
           maxSeconds: maxSec, normalizePeers: normPeers
-        })
+        }),
+        signal: abortController.signal
       });
       const row = await resp.json();
       results[i] = buildRow(i, row);
     } catch(e) {
-      results[i] = buildRow(i, { error: String(e), elapsed_ms: 0, analysis: null,
-                                  api_url: '', app_search: '', app_url: '', raw_body: null });
+      // AbortError = user clicked Stop; record a stub and move on quietly
+      if (e.name === 'AbortError') {
+        results[i] = buildRow(i, { error: 'stopped', elapsed_ms: 0, analysis: null,
+                                    api_url: '', app_search: '', app_url: '', raw_body: null });
+      } else {
+        results[i] = buildRow(i, { error: String(e), elapsed_ms: 0, analysis: null,
+                                    api_url: '', app_search: '', app_url: '', raw_body: null });
+      }
     }
 
     inFlight--;
@@ -1241,6 +1250,9 @@ async function runHistory() {
 
 function stopAudit() {
   stopped = true;
+  if (abortController) {
+    abortController.abort();
+  }
 }
 
 function setProgress(done, total, label) {
@@ -1754,12 +1766,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def handle_error(self, request, client_address):
-        import sys
-        if sys.exc_info()[0] in (BrokenPipeError, ConnectionResetError):
-            return
-        super().handle_error(request, client_address)
-
 
 def run():
     print('\n  ⬡  Forward Networks — Path Search History Tool')
@@ -1769,7 +1775,7 @@ def run():
     BASE_URL, NETWORKS_DATA = _helpers.collect_credentials(
         CREDENTIALS, args, _load_discovery().discover_all)
 
-    server = http.server.HTTPServer(('127.0.0.1', PORT), Handler)
+    server = _helpers.ToolkitServer(('127.0.0.1', PORT), Handler)
 
     if not args['no_browser']:
         def open_browser():

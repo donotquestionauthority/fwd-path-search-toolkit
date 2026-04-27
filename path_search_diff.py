@@ -2043,12 +2043,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
 
-    def handle_error(self, request, client_address):
-        import sys
-        if sys.exc_info()[0] in (BrokenPipeError, ConnectionResetError):
-            return
-        super().handle_error(request, client_address)
-
 
 def run():
     print('\n  \u2b61  Forward Networks \u2014 Path Search Diff Tool')
@@ -2059,7 +2053,7 @@ def run():
     BASE_URL, NETWORKS_DATA = _helpers.collect_credentials(
         CREDENTIALS, args, _load_discovery().discover_all)
 
-    server = http.server.HTTPServer(('127.0.0.1', PORT), Handler)
+    server = _helpers.ToolkitServer(('127.0.0.1', PORT), Handler)
 
     if not args['no_browser']:
         def open_browser():

@@ -346,7 +346,7 @@ def run():
 
     launch_tools(extra_env=extra_env if extra_env else None)
 
-    server = http.server.HTTPServer(("127.0.0.1", HOME_PORT), HomeHandler)
+    server = helpers.ToolkitServer(("127.0.0.1", HOME_PORT), HomeHandler)
 
     def open_browser():
         time.sleep(0.6)

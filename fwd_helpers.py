@@ -12,6 +12,7 @@ Import with:
 """
 
 import base64
+import http.server
 import os
 import subprocess
 import sys
@@ -217,3 +218,31 @@ def get_snapshot_label(networks_data, network_id, snapshot_id):
                 if s["id"] == snapshot_id:
                     return s.get("label") or snapshot_id[-8:]
     return snapshot_id[-8:]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HTTP server
+# ─────────────────────────────────────────────────────────────────────────────
+
+class ToolkitServer(http.server.ThreadingHTTPServer):
+    """Shared base server for all toolkit tools.
+
+    Provides:
+    * Threaded request handling — long-running path searches and SSE streams
+      no longer block health-check pings from the launcher.
+    * Daemon worker threads — Ctrl+C exits cleanly even if requests are
+      still in flight.
+    * BrokenPipeError / ConnectionResetError suppression — these are routine
+      when a browser closes a connection mid-response (refresh, navigate
+      away, hit Stop) and produce noisy tracebacks otherwise.
+    """
+    daemon_threads = True
+    allow_reuse_address = True
+
+    def handle_error(self, request, client_address):
+        exc_type = sys.exc_info()[0]
+        if exc_type is not None and issubclass(
+            exc_type, (BrokenPipeError, ConnectionResetError)
+        ):
+            return
+        super().handle_error(request, client_address)
