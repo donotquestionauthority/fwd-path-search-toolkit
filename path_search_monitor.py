@@ -102,7 +102,7 @@ def run_path_search(network_id, snapshot_id, src_ip, dst_ip,
     t0 = time.time()
     for attempt in range(2):
         try:
-            with urllib.request.urlopen(req, timeout=max_seconds + 120) as resp:
+            with urllib.request.urlopen(req, timeout=max_seconds + _helpers.API_TIMEOUT_S) as resp:
                 body = json.loads(resp.read().decode("utf-8"))
                 return resp.status, body, round((time.time() - t0) * 1000), None
         except urllib.error.HTTPError as e:
@@ -281,7 +281,7 @@ def api_patch(network_id, path, payload=None, params=None):
     req.add_header("Content-Type", "application/json")
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        with urllib.request.urlopen(req, timeout=_helpers.API_TIMEOUT_S) as resp:
             try:    body = json.loads(resp.read().decode("utf-8"))
             except: body = {}
             return resp.status, body, None

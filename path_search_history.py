@@ -84,7 +84,7 @@ def api_get(base_url, network_id, path, params=None):
     req.add_header("Authorization", CREDENTIALS[network_id])
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=_helpers.API_TIMEOUT_S) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8")), None
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8")
@@ -183,7 +183,7 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
 
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=max_seconds + 120) as resp:
+        with urllib.request.urlopen(req, timeout=max_seconds + _helpers.API_TIMEOUT_S) as resp:
             body   = json.loads(resp.read().decode("utf-8"))
             status = resp.status
     except urllib.error.HTTPError as e:
@@ -1753,6 +1753,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
+
+    def handle_error(self, request, client_address):
+        import sys
+        if sys.exc_info()[0] in (BrokenPipeError, ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
 
 
 def run():

@@ -1916,7 +1916,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 _qs         = urllib.parse.urlparse(url).query
                 _params     = dict(p.split('=') for p in _qs.split('&') if '=' in p)
                 _max_sec    = int(_params.get('maxSeconds', 30))
-                _sock_timeout = _max_sec + 120
+                _sock_timeout = _max_sec + _helpers.API_TIMEOUT_S
 
                 req = urllib.request.Request(url)
                 req.add_header('Authorization', CREDENTIALS[network_id])

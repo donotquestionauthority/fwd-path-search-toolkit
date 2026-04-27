@@ -17,7 +17,7 @@ def api_get(base_url, path, auth_header):
     req.add_header("Authorization", auth_header)
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=150) as resp:  # matches fwd_helpers.API_TIMEOUT_S
             return resp.status, json.loads(resp.read().decode("utf-8")), None
     except urllib.error.HTTPError as e:
         return e.code, None, f"HTTP {e.code}: {e.read().decode('utf-8')[:300]}"

@@ -18,6 +18,17 @@ import sys
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Shared constants
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Single source of truth for all API call timeouts across the toolkit.
+# Applied to every urlopen() call and every concurrent.futures.as_completed()
+# wait.  Path search socket timeouts use maxSeconds + API_TIMEOUT_S so the
+# socket outlives the server-side search budget.
+API_TIMEOUT_S = 150
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Argument parsing
 # ─────────────────────────────────────────────────────────────────────────────
 

@@ -88,7 +88,7 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
         if attempt > 0:
             time.sleep(3)
         try:
-            with urllib.request.urlopen(req, timeout=max_seconds + 120) as resp:
+            with urllib.request.urlopen(req, timeout=max_seconds + _helpers.API_TIMEOUT_S) as resp:
                 body   = resp.read().decode("utf-8")
                 status = resp.status
             return status, body, round((time.time() - t0) * 1000)

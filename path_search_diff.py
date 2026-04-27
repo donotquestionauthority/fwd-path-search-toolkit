@@ -203,7 +203,9 @@ SYNTHETIC_PREFIXES = ("internet ", "MPLS-", "MPLS_")
 # Global topology cache — populated by /run-diff-all, consumed by analysis
 _topo_cache    = {}
 _file_name_cache = set()  # unique file names seen across last run
-ANALYSIS_POOL_SIZE = 10  # concurrent device analysis workers
+ANALYSIS_POOL_SIZE  = 10   # concurrent device analysis workers
+DEVICE_TIMEOUT_S    = _helpers.API_TIMEOUT_S   # max seconds to wait for a single device analysis
+FILE_FETCH_TIMEOUT_S = _helpers.API_TIMEOUT_S  # max seconds to wait for a single file fetch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -296,9 +298,11 @@ def _ensure_filters_file():
 # API helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def api_get(base_url, network_id, path, params=None, timeout=30, text=False,
+def api_get(base_url, network_id, path, params=None, timeout=None, text=False,
             _retries=2, _backoff=2.0):
     """GET wrapper with retry on transient errors (SSL EOF, connection reset, timeout)."""
+    if timeout is None:
+        timeout = _helpers.API_TIMEOUT_S
     if network_id not in CREDENTIALS:
         return None, None, f"No credentials for network {network_id}"
     qs  = ("?" + urllib.parse.urlencode(params)) if params else ""
@@ -356,7 +360,7 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
     req.add_header("Accept", "application/json")
     t0 = time.time()
     try:
-        with urllib.request.urlopen(req, timeout=max_seconds + 120) as resp:
+        with urllib.request.urlopen(req, timeout=max_seconds + _helpers.API_TIMEOUT_S) as resp:
             body    = json.loads(resp.read().decode("utf-8"))
             elapsed = round((time.time() - t0) * 1000)
             return resp.status, body, elapsed, None
@@ -450,8 +454,7 @@ def get_device_meta(base_url, network_id, device_name, snapshot_id):
 def get_topology(base_url, network_id, snapshot_id):
     status, data, err = api_get(
         base_url, network_id,
-        f"/api/snapshots/{snapshot_id}/topology",
-        timeout=60
+        f"/api/snapshots/{snapshot_id}/topology"
     )
     if err or data is None:
         return [], err
@@ -671,13 +674,25 @@ def analyze_device(base_url, network_id, device_name,
             futs = {fpool.submit(fetch_and_diff_file, fname): fname for fname in all_names}
             # Preserve sorted order (all_names is already sorted)
             results_map = {}
-            for fut in concurrent.futures.as_completed(futs):
-                fname = futs[fut]
-                try:
-                    results_map[fname] = fut.result()
-                except Exception as e:
-                    results_map[fname] = {"name": fname, "status": "error",
-                                          "error": str(e), "noisy": fname in NOISY_FILES}
+            try:
+                for fut in concurrent.futures.as_completed(futs, timeout=FILE_FETCH_TIMEOUT_S):
+                    fname = futs[fut]
+                    try:
+                        results_map[fname] = fut.result(timeout=FILE_FETCH_TIMEOUT_S)
+                    except concurrent.futures.TimeoutError:
+                        results_map[fname] = {"name": fname, "status": "error",
+                                              "error": f"File fetch timed out after {FILE_FETCH_TIMEOUT_S}s",
+                                              "noisy": fname in NOISY_FILES}
+                    except Exception as e:
+                        results_map[fname] = {"name": fname, "status": "error",
+                                              "error": str(e), "noisy": fname in NOISY_FILES}
+            except concurrent.futures.TimeoutError:
+                for fut, fname in futs.items():
+                    if fname not in results_map:
+                        results_map[fname] = {"name": fname, "status": "error",
+                                              "error": f"File fetch timed out after {FILE_FETCH_TIMEOUT_S}s — API may be hung",
+                                              "noisy": fname in NOISY_FILES}
+                    fut.cancel()
             file_results = [results_map[fname] for fname in all_names]
 
     def file_sort(f):
@@ -1899,26 +1914,54 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=ANALYSIS_POOL_SIZE) as pool:
                 futures = {pool.submit(analyse_one, h): h for h in non_synthetic}
-                for fut in concurrent.futures.as_completed(futures):
-                    done_count += 1
-                    try:
-                        name, result = fut.result()
-                    except Exception as e:
-                        hop  = futures[fut]
-                        name = hop['deviceName']
-                        result = {
-                            'deviceName': name, 'synthetic': False,
-                            'severity': 'error', 'errors': [str(e)],
-                            'metadata': {}, 'topology': {}, 'files': []
-                        }
-                    emit({
-                        'stage':      'device',
-                        'done':       done_count,
-                        'total':      total,
-                        'deviceName': name,
-                        'severity':   result.get('severity', 'clean'),
-                        'analysis':   result,
-                    })
+                try:
+                    for fut in concurrent.futures.as_completed(futures, timeout=DEVICE_TIMEOUT_S):
+                        done_count += 1
+                        try:
+                            name, result = fut.result(timeout=DEVICE_TIMEOUT_S)
+                        except concurrent.futures.TimeoutError:
+                            hop  = futures[fut]
+                            name = hop['deviceName']
+                            result = {
+                                'deviceName': name, 'synthetic': False,
+                                'severity': 'error', 'errors': [f'Analysis timed out after {DEVICE_TIMEOUT_S}s'],
+                                'metadata': {}, 'topology': {}, 'files': []
+                            }
+                        except Exception as e:
+                            hop  = futures[fut]
+                            name = hop['deviceName']
+                            result = {
+                                'deviceName': name, 'synthetic': False,
+                                'severity': 'error', 'errors': [str(e)],
+                                'metadata': {}, 'topology': {}, 'files': []
+                            }
+                        emit({
+                            'stage':      'device',
+                            'done':       done_count,
+                            'total':      total,
+                            'deviceName': name,
+                            'severity':   result.get('severity', 'clean'),
+                            'analysis':   result,
+                        })
+                except concurrent.futures.TimeoutError:
+                    # One or more devices never completed — emit error stubs for them
+                    for fut, hop in futures.items():
+                        if not fut.done():
+                            done_count += 1
+                            emit({
+                                'stage':      'device',
+                                'done':       done_count,
+                                'total':      total,
+                                'deviceName': hop['deviceName'],
+                                'severity':   'error',
+                                'analysis':   {
+                                    'deviceName': hop['deviceName'], 'synthetic': False,
+                                    'severity': 'error',
+                                    'errors': [f'Analysis timed out after {DEVICE_TIMEOUT_S}s — API call may be hung'],
+                                    'metadata': {}, 'topology': {}, 'files': []
+                                },
+                            })
+                        fut.cancel()
 
             emit({'stage': 'done'})
 
@@ -1999,6 +2042,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
+
+    def handle_error(self, request, client_address):
+        import sys
+        if sys.exc_info()[0] in (BrokenPipeError, ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
 
 
 def run():
