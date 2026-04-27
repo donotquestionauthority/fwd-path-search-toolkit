@@ -835,8 +835,17 @@ function loadSavedSearch() {
 
   document.getElementById('base').value = p.base || 'https://fwd.app';
 
+  // Restore network — resolve by networkId (current format).
+  // Falls back to legacy networkIdx for old saved searches.
   const netSel = document.getElementById('network-select');
-  netSel.value = p.networkIdx !== undefined ? p.networkIdx : '';
+  let resolvedIdx = '';
+  if (p.networkId) {
+    const found = discoveredNetworks.findIndex(n => n.id === p.networkId);
+    if (found >= 0) resolvedIdx = String(found);
+  } else if (p.networkIdx !== undefined && p.networkIdx !== '') {
+    resolvedIdx = p.networkIdx;
+  }
+  netSel.value = resolvedIdx;
   document.getElementById('network-id-display').textContent =
     netSel.value !== '' ? `ID: ${discoveredNetworks[parseInt(netSel.value)].id}` : '';
 
@@ -863,9 +872,11 @@ function loadSavedSearch() {
 }
 
 function currentParams() {
+  const netIdx = document.getElementById('network-select').value;
+  const networkId = netIdx !== '' ? discoveredNetworks[parseInt(netIdx)].id : '';
   return {
     base:          document.getElementById('base').value.trim(),
-    networkIdx:    document.getElementById('network-select').value,
+    networkId,
     snapshotId:    document.getElementById('snapshot-select').value,
     srcIp:         document.getElementById('srcIp').value.trim(),
     dstIp:         document.getElementById('dstIp').value.trim(),

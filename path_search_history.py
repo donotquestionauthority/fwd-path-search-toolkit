@@ -941,27 +941,20 @@ function applySearch(p) {
   if (p.normalizePeers !== undefined)
     document.getElementById('normalize-peers').checked = p.normalizePeers;
 
-  // Restore network selection by network ID.
-  // Dashlane can clear a select's value synchronously on the change event that
-  // triggered this call, so we set the value and then re-assert it in a
-  // microtask (queueMicrotask) and again in a short setTimeout, ensuring our
-  // value wins even if a password manager injects after the synchronous path.
+  // Restore network by ID.
+  // All tools now save networkId (the actual network ID string).
+  // Legacy fallback: old saved searches from the builder may have networkIdx
+  // (positional dropdown index) instead — handle that for backwards compat.
+  let netIdx = -1;
   if (p.networkId) {
-    const netIdx = discoveredNetworks.findIndex(n => n.id === p.networkId);
-    if (netIdx >= 0) {
-      const sel = document.getElementById('network-select');
-      const applyNetworkValue = () => {
-        if (sel.value !== String(netIdx)) {
-          sel.value = netIdx;
-          onNetworkSelect();
-        }
-      };
-      sel.value = netIdx;
-      onNetworkSelect();
-      queueMicrotask(applyNetworkValue);
-      setTimeout(applyNetworkValue, 50);
-      setTimeout(applyNetworkValue, 320);
-    }
+    netIdx = discoveredNetworks.findIndex(n => n.id === p.networkId);
+  } else if (p.networkIdx !== undefined && p.networkIdx !== '') {
+    netIdx = parseInt(p.networkIdx);
+    if (netIdx >= discoveredNetworks.length) netIdx = -1;
+  }
+  if (netIdx >= 0) {
+    document.getElementById('network-select').value = netIdx;
+    onNetworkSelect();
   }
 }
 
