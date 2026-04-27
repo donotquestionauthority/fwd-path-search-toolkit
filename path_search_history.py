@@ -100,8 +100,15 @@ def api_get(base_url, network_id, path, params=None):
 def list_processed_snapshots(base_url, network_id, days_back):
     """
     Fetch all PROCESSED snapshots for a network within the last `days_back` days.
-    Returns list of SnapshotInfo dicts, newest first, filtered to the date window.
-    The API returns snapshots newest-first natively.
+    Returns list of SnapshotInfo dicts, oldest first, filtered to the date window.
+
+    Date filtering uses createdAt for COLLECTION snapshots (reflects when the data
+    was captured) and processedAt for non-COLLECTION snapshots (import/reprocess/fork).
+    This matches fwd_helpers.snapshot_sort_key and fwd_discovery label logic.
+
+    Using processedAt for COLLECTION snapshots caused old snapshots that were
+    reprocessed recently to appear inside the date window with the reprocess date,
+    producing duplicate apparent dates for the same calendar day.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
     params = {"state": "PROCESSED", "limit": "500"}
@@ -112,10 +119,18 @@ def list_processed_snapshots(base_url, network_id, days_back):
 
     snapshots = data.get("snapshots", [])
 
-    # Filter to date window using processedAt (ISO 8601 string)
     result = []
     for s in snapshots:
-        ts_str = s.get("processedAt") or s.get("createdAt")
+        trigger = (s.get("trigger") or "").upper()
+        # For COLLECTION snapshots use createdAt — this is when the data was
+        # captured. processedAt reflects when processing finished, which changes
+        # on every reprocess and does not represent data age.
+        # For non-COLLECTION snapshots (import/reprocess/fork) fall back to
+        # processedAt as createdAt may not reflect data age either.
+        if trigger in ("COLLECTION", "UNKNOWN", ""):
+            ts_str = s.get("createdAt") or s.get("processedAt")
+        else:
+            ts_str = s.get("processedAt") or s.get("createdAt")
         if not ts_str:
             continue
         try:
@@ -126,7 +141,7 @@ def list_processed_snapshots(base_url, network_id, days_back):
         if ts >= cutoff:
             result.append({
                 "id":          s["id"],
-                "processedAt": ts_str,
+                "processedAt": s.get("processedAt", ts_str),
                 "ts":          ts.isoformat(),
                 "label":       ts.strftime("%Y-%m-%d %H:%M UTC"),
                 "date":        ts.strftime("%Y-%m-%d"),
@@ -695,12 +710,13 @@ HTML = r"""<!DOCTYPE html>
     <div class="card">
       <div class="card-title">── SAVED SEARCHES</div>
       <div class="ss-row">
-        <select id="saved-select" onchange="loadSavedSearch()" autocomplete="off" data-lpignore="true">
+        <select id="saved-select" onchange="loadSavedSearch(); updateSaveBtn();" autocomplete="off" data-form-type="other" data-lpignore="true">
           <option value="">— select a saved search —</option>
         </select>
       </div>
       <div class="ss-row" style="margin-top:8px">
-        <button class="btn-secondary btn-sm" onclick="saveCurrentSearch()">Save as...</button>
+        <button class="btn-secondary btn-sm" id="save-btn" onclick="saveCurrentSearch()" disabled title="Overwrite selected search with current params">Save</button>
+        <button class="btn-secondary btn-sm" onclick="saveCurrentSearchAs()">Save as...</button>
         <button class="btn-secondary btn-sm" onclick="deleteSavedSearch()">Delete</button>
       </div>
       <div id="save-status" class="save-status" style="margin-top:6px"></div>
@@ -710,7 +726,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="card-title">── NETWORK</div>
       <div class="row">
         <label>Network <span>*</span></label>
-        <select id="network-select" onchange="onNetworkSelect()" autocomplete="off" data-lpignore="true">
+        <select id="network-select" onchange="onNetworkSelect()" autocomplete="off" data-form-type="other" data-lpignore="true">
           <option value="">— select —</option>
         </select>
         <span id="cred-indicator"></span>
@@ -748,7 +764,7 @@ HTML = r"""<!DOCTYPE html>
       <div class="card-sep"></div>
       <div class="row">
         <label>intent</label>
-        <select id="intent">
+        <select id="intent" autocomplete="off" data-form-type="other" data-lpignore="true">
           <option value="PREFER_DELIVERED">PREFER_DELIVERED</option>
           <option value="PREFER_VIOLATIONS">PREFER_VIOLATIONS</option>
           <option value="VIOLATIONS_ONLY">VIOLATIONS_ONLY</option>
@@ -903,32 +919,62 @@ function renderSavedSearchDropdown() {
     sel.appendChild(opt);
   });
   if (cur !== '') sel.value = cur;
+  updateSaveBtn();
+}
+
+function updateSaveBtn() {
+  const sel = document.getElementById('saved-select');
+  document.getElementById('save-btn').disabled = (sel.value === '');
+}
+
+function applySearch(p) {
+  document.getElementById('base-url').value     = p.base || 'https://fwd.app';
+  document.getElementById('src-ip').value       = p.srcIp    || '';
+  document.getElementById('dst-ip').value       = p.dstIp    || '';
+  document.getElementById('ip-proto').value     = p.ipProto  || '';
+  document.getElementById('dst-port').value     = p.dstPort  || '';
+  document.getElementById('max-cand').value     = p.maxCandidates || 5000;
+  document.getElementById('max-results').value  = p.maxResults    || 1;
+  document.getElementById('max-sec').value      = p.maxSeconds    || 30;
+  document.getElementById('intent').value       = p.intent || 'PREFER_DELIVERED';
+  if (p.daysBack)       document.getElementById('days-back').value = p.daysBack;
+  if (p.normalizePeers !== undefined)
+    document.getElementById('normalize-peers').checked = p.normalizePeers;
+
+  // Restore network selection by network ID.
+  // Dashlane can clear a select's value synchronously on the change event that
+  // triggered this call, so we set the value and then re-assert it in a
+  // microtask (queueMicrotask) and again in a short setTimeout, ensuring our
+  // value wins even if a password manager injects after the synchronous path.
+  if (p.networkId) {
+    const netIdx = discoveredNetworks.findIndex(n => n.id === p.networkId);
+    if (netIdx >= 0) {
+      const sel = document.getElementById('network-select');
+      const applyNetworkValue = () => {
+        if (sel.value !== String(netIdx)) {
+          sel.value = netIdx;
+          onNetworkSelect();
+        }
+      };
+      sel.value = netIdx;
+      onNetworkSelect();
+      queueMicrotask(applyNetworkValue);
+      setTimeout(applyNetworkValue, 50);
+      setTimeout(applyNetworkValue, 320);
+    }
+  }
 }
 
 function loadSavedSearch() {
   const idx = document.getElementById('saved-select').value;
   if (idx === '') return;
   const p = savedSearches[parseInt(idx)].params;
-
-  document.getElementById('base-url').value  = p.base || 'https://fwd.app';
-  document.getElementById('src-ip').value    = p.srcIp    || '';
-  document.getElementById('dst-ip').value    = p.dstIp    || '';
-  document.getElementById('ip-proto').value  = p.ipProto  || '';
-  document.getElementById('dst-port').value  = p.dstPort  || '';
-  document.getElementById('max-cand').value     = p.maxCandidates || 5000;
-  document.getElementById('max-results').value  = p.maxResults    || 1;
-  document.getElementById('max-sec').value      = p.maxSeconds    || 30;
-
-  const intentSel = document.getElementById('intent');
-  intentSel.value = p.intent || 'PREFER_DELIVERED';
-
-  // Restore network selection by network ID
-  if (p.networkId) {
-    const idx = discoveredNetworks.findIndex(n => n.id === p.networkId);
-    if (idx >= 0) {
-      document.getElementById('network-select').value = idx;
-      onNetworkSelect();
-    }
+  // If the network dropdown hasn't been rendered yet (e.g. if the user selects
+  // a saved search very quickly after page load), retry after the boot timeout.
+  if (discoveredNetworks.length > 0) {
+    applySearch(p);
+  } else {
+    setTimeout(() => applySearch(p), 350);
   }
 }
 
@@ -946,10 +992,27 @@ function currentParams() {
     maxCandidates: document.getElementById('max-cand').value,
     maxResults:    document.getElementById('max-results').value,
     maxSeconds:    document.getElementById('max-sec').value,
+    daysBack:      document.getElementById('days-back').value,
+    normalizePeers: document.getElementById('normalize-peers').checked,
   };
 }
 
 async function saveCurrentSearch() {
+  // Save (overwrite) — only active when a saved search is selected
+  const idx = document.getElementById('saved-select').value;
+  if (idx === '') return;
+  const name = savedSearches[parseInt(idx)].name;
+  savedSearches[parseInt(idx)] = { name, params: currentParams() };
+  await fetch('/config', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ savedSearches })
+  });
+  renderSavedSearchDropdown();
+  document.getElementById('saved-select').value = idx;
+  flashStatus('save-status', `✓ Saved "${name}"`);
+}
+
+async function saveCurrentSearchAs() {
   const name = prompt('Name this saved search:');
   if (!name || !name.trim()) return;
   const trimmed = name.trim();

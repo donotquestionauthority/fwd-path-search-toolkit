@@ -440,10 +440,11 @@ HTML = r"""<!DOCTYPE html>
       </div>
       <div class="panel-body">
         <div class="ss-row">
-          <select id="saved-select" onchange="loadSavedSearch()">
+          <select id="saved-select" onchange="loadSavedSearch(); updateSaveBtn();">
             <option value="">— select a saved search —</option>
           </select>
-          <button class="btn-secondary btn-sm" onclick="saveCurrentSearch()">Save as...</button>
+          <button class="btn-secondary btn-sm" id="save-btn" onclick="saveCurrentSearch()" disabled title="Overwrite selected search with current params">Save</button>
+          <button class="btn-secondary btn-sm" onclick="saveCurrentSearchAs()">Save as...</button>
           <button class="btn-danger btn-sm" onclick="deleteSavedSearch()">Delete</button>
         </div>
         <div id="save-status" class="save-status" style="margin-top:6px;color:var(--success)"></div>
@@ -819,6 +820,12 @@ function renderSavedSearchDropdown() {
     sel.appendChild(opt);
   });
   if (current !== '') sel.value = current;
+  updateSaveBtn();
+}
+
+function updateSaveBtn() {
+  const sel = document.getElementById('saved-select');
+  document.getElementById('save-btn').disabled = (sel.value === '');
 }
 
 function loadSavedSearch() {
@@ -873,6 +880,18 @@ function currentParams() {
 }
 
 async function saveCurrentSearch() {
+  // Save (overwrite) — overwrites the currently selected saved search in place
+  const idx = document.getElementById('saved-select').value;
+  if (idx === '') return;
+  const name = config.savedSearches[parseInt(idx)].name;
+  config.savedSearches[parseInt(idx)] = { name, params: currentParams() };
+  await persist();
+  renderSavedSearchDropdown();
+  document.getElementById('saved-select').value = idx;
+  flashStatus('save-status', `✓ Saved "${name}"`);
+}
+
+async function saveCurrentSearchAs() {
   const name = prompt('Name this saved search:');
   if (!name || !name.trim()) return;
   const trimmed = name.trim();
@@ -900,8 +919,6 @@ async function deleteSavedSearch() {
   await persist();
   renderSavedSearchDropdown();
 }
-
-// ── Manage panel removed — networks/snapshots discovered live from API ──────────
 
 // ── URL builder ────────────────────────────────────────────────────────────────
 function bindInputs() {

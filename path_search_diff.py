@@ -920,9 +920,10 @@ HTML = r"""<!DOCTYPE html>
         <div class="saved-row">
           <label>SAVED SEARCHES</label>
           <div style="display:flex;gap:6px;align-items:center">
-            <select id="saved-sel" autocomplete="off" data-form-type="other" data-lpignore="true" onchange="loadSaved()" style="flex:1">
+            <select id="saved-sel" autocomplete="off" data-form-type="other" data-lpignore="true" onchange="loadSaved(); updateSaveBtn();" style="flex:1">
               <option value="">&#x2014; select a saved search &#x2014;</option>
             </select>
+            <button class="btn-sm" id="save-btn" onclick="saveSearch()" disabled title="Overwrite selected search with current params" style="flex-shrink:0;padding:3px 8px">Save</button>
             <button class="btn-sm" onclick="deleteSaved()" title="Delete selected search" style="flex-shrink:0;padding:3px 8px;color:var(--error);border-color:var(--error)">&#x2715;</button>
           </div>
         </div>
@@ -1001,7 +1002,7 @@ HTML = r"""<!DOCTYPE html>
 
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:4px">
           <button class="btn" id="run-btn" onclick="runDiff()">&#x25b6; RUN DIFF</button>
-          <button class="btn-sm" onclick="saveSearch()">&#x229e; Save Search</button>
+          <button class="btn-sm" onclick="saveSearchAs()">&#x229e; Save as...</button>
           <button class="btn-sm" onclick="clearAll()">&#x2715; Clear</button>
           <a id="export-file-list-btn" href="/export-file-list" download="diff_file_list.txt"
              class="btn-sm" style="display:none;text-decoration:none">&#x2b07; Export File List</a>
@@ -1079,6 +1080,12 @@ function buildSavedSel() {
     sel.appendChild(o);
   });
   if (cur !== '') sel.value = cur;
+  updateSaveBtn();
+}
+
+function updateSaveBtn() {
+  const sel = document.getElementById('saved-sel');
+  document.getElementById('save-btn').disabled = (sel.value === '');
 }
 
 function buildFilterSels() {
@@ -1188,11 +1195,8 @@ async function deleteSaved() {
   buildSavedSel();
 }
 
-async function saveSearch() {
-  const name = prompt('Save search as:');
-  if (!name) return;
-  diffSavedSearches.push({
-    name,
+function currentDiffParams() {
+  return {
     networkId:     document.getElementById('sel-net').value,
     snapWorking:   document.getElementById('sel-snap-w').value,
     snapBroken:    document.getElementById('sel-snap-b').value,
@@ -1202,7 +1206,27 @@ async function saveSearch() {
     ipProto:       document.getElementById('sel-proto').value,
     dstPort:       document.getElementById('inp-port').value.trim(),
     maxCandidates: document.getElementById('inp-maxcand').value.trim(),
+  };
+}
+
+async function saveSearch() {
+  // Save (overwrite) — overwrites the currently selected saved search in place
+  const idx = document.getElementById('saved-sel').value;
+  if (idx === '') return;
+  const name = diffSavedSearches[parseInt(idx)].name;
+  diffSavedSearches[parseInt(idx)] = { name, ...currentDiffParams() };
+  await fetch('/config', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({diffSavedSearches})
   });
+  buildSavedSel();
+  document.getElementById('saved-sel').value = idx;
+}
+
+async function saveSearchAs() {
+  const name = prompt('Save search as:');
+  if (!name) return;
+  diffSavedSearches.push({ name, ...currentDiffParams() });
   await fetch('/config', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({diffSavedSearches})
