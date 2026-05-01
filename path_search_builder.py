@@ -13,8 +13,8 @@ import os
 import urllib.request
 import urllib.error
 import urllib.parse
-import base64
 import sys
+import time
 import importlib.util
 
 def _load_helpers():
@@ -53,8 +53,12 @@ def read_config():
         return DEFAULT_CONFIG.copy()
 
 def write_config(data):
+    """Merge data into the config file, preserving keys we don't own
+    (e.g. diffSavedSearches written by path_search_diff.py)."""
+    existing = read_config()
+    existing.update(data)
     with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(existing, f, indent=2)
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -693,6 +697,11 @@ HTML = r"""<!DOCTYPE html>
 
 <script>
 // ── State ──────────────────────────────────────────────────────────────────────
+// Device types the API treats as firewalls — keep in sync with FIREWALL_TYPES
+// in fwd_helpers.py. Includes cloud firewalls so AWS/Azure paths aren't
+// silently missed by FW count, FW-only filter, or FW summary.
+const FIREWALL_TYPES = new Set(['FIREWALL', 'AWS_NETWORK_FIREWALL', 'AZURE_FIREWALL']);
+
 let config             = { savedSearches: [] };
 let discoveredNetworks = [];          // [{ id, name, snapshots:[{id,label}] }]
 let credentialedNetworks = new Set();
@@ -1242,7 +1251,7 @@ function applyFilters() {
           return dtOk && dnOk && dispOk;
         });
     // FW only filter
-    const fwHops = hops.filter(h => h.deviceType === 'FIREWALL');
+    const fwHops = hops.filter(h => FIREWALL_TYPES.has(h.deviceType));
     const fwOnlyOk = !fwOnly || fwHops.length > 0;
     // FW fingerprint filter
     const fwFingerprintOk = !activeFwFingerprint || fingerprintMatches(fwHops, activeFwFingerprint);
@@ -1253,8 +1262,8 @@ function applyFilters() {
   // Sort
   if (rankByFwCount) {
     filteredPaths.sort((a, b) => {
-      const aFw = (a.hops || []).filter(h => h.deviceType === 'FIREWALL').length;
-      const bFw = (b.hops || []).filter(h => h.deviceType === 'FIREWALL').length;
+      const aFw = (a.hops || []).filter(h => FIREWALL_TYPES.has(h.deviceType)).length;
+      const bFw = (b.hops || []).filter(h => FIREWALL_TYPES.has(h.deviceType)).length;
       return bFw - aFw;
     });
   } else if (rankByHops) {
@@ -1570,7 +1579,7 @@ function resetFilters() {
 // ── Firewall helpers ──────────────────────────────────────────────────────────
 function getFwNames(path) {
   return (path.hops || [])
-    .filter(h => h.deviceType === 'FIREWALL')
+    .filter(h => FIREWALL_TYPES.has(h.deviceType))
     .map(h => h.deviceName || '(unnamed)')
     .sort();
 }
@@ -1925,7 +1934,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 last_err = None
                 for attempt in range(2):
                     if attempt > 0:
-                        import time as _t; _t.sleep(3)
+                        time.sleep(3)
                     try:
                         with urllib.request.urlopen(req, timeout=_sock_timeout) as resp:
                             status  = resp.status
@@ -1979,7 +1988,6 @@ def run():
 
     if not args['no_browser']:
         def open_browser():
-            import time
             time.sleep(0.4)
             webbrowser.open(f'http://localhost:{PORT}')
         threading.Thread(target=open_browser, daemon=True).start()

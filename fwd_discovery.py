@@ -1,14 +1,28 @@
 """
 Forward Networks — shared network/snapshot discovery module.
-Used by both path_search_builder.py and path_search_compare.py.
+Used by all toolkit tools (builder, compare, history, diff, monitor) to
+populate networks and snapshots at startup.
 
 GET /api/networks          — get all networks, find ours by ID
 GET /api/networks/:id/snapshots — get snapshots for each credentialed network
 """
 
+import importlib.util
+import os
 import urllib.request
 import urllib.error
 import json
+
+
+def _load_helpers():
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fwd_helpers.py")
+    spec = importlib.util.spec_from_file_location("fwd_helpers", path)
+    mod  = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+_helpers = _load_helpers()
 
 
 def api_get(base_url, path, auth_header):
@@ -17,7 +31,7 @@ def api_get(base_url, path, auth_header):
     req.add_header("Authorization", auth_header)
     req.add_header("Accept", "application/json")
     try:
-        with urllib.request.urlopen(req, timeout=150) as resp:  # matches fwd_helpers.API_TIMEOUT_S
+        with urllib.request.urlopen(req, timeout=_helpers.API_TIMEOUT_S) as resp:
             return resp.status, json.loads(resp.read().decode("utf-8")), None
     except urllib.error.HTTPError as e:
         return e.code, None, f"HTTP {e.code}: {e.read().decode('utf-8')[:300]}"

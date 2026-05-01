@@ -2013,7 +2013,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             header = (
                 '# Unique file names across all devices in last diff run\n'
                 '# Status: [diffed] = currently diffed | [skipped] = not diffed\n'
-                '# To change what gets diffed, edit INCLUDE_FILES in path_search_diff.py\n\n'
+                '# To change what gets diffed, edit "includeFiles" in path_diff_filters.json\n\n'
             )
             annotated = []
             for name in all_seen:

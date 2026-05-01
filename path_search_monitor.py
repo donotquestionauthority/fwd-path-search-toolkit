@@ -5,7 +5,6 @@ Watchlist-based regression monitor for resolved path search issues.
 Port 8769
 """
 
-import base64
 import importlib.util
 import json
 import os
@@ -20,7 +19,6 @@ import webbrowser
 import zipfile
 import http.server
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 def _load_helpers():
     import importlib.util as _ilu
@@ -33,7 +31,7 @@ _helpers = _load_helpers()
 
 PORT         = 8769
 MONITOR_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "path_search_monitor.json")
-FIREWALL_TYPES = {"FIREWALL", "AWS_NETWORK_FIREWALL", "AZURE_FIREWALL"}
+FIREWALL_TYPES = _helpers.FIREWALL_TYPES
 
 CREDENTIALS  = {}
 NETWORKS_DATA = []

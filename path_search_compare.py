@@ -16,7 +16,6 @@ import os
 import urllib.request
 import urllib.error
 import urllib.parse
-import base64
 import time
 import importlib.util
 
@@ -30,7 +29,6 @@ _helpers = _load_helpers()
 
 
 PORT = 8766
-CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "path_search_config.json")
 
 CREDENTIALS   = {}
 BASE_URL      = "https://fwd.app"
@@ -44,15 +42,6 @@ def _load_discovery():
     spec.loader.exec_module(mod)
     return mod
 
-
-def read_config():
-    if not os.path.exists(CONFIG_FILE):
-        return {"networks": [], "savedSearches": []}
-    try:
-        with open(CONFIG_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {"networks": [], "savedSearches": []}
 
 def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
                     intent, max_candidates, ip_proto, dst_port, max_seconds=300):
@@ -116,7 +105,7 @@ def analyze_paths(body, consensus_threshold):
     fw_fingerprints = []
     for p in paths:
         hops    = p.get("hops", [])
-        fw_hops = [h for h in hops if h.get("deviceType") == "FIREWALL"]
+        fw_hops = [h for h in hops if h.get("deviceType") in _helpers.FIREWALL_TYPES]
         fw_names= sorted(set(h.get("deviceName", "(unnamed)") for h in fw_hops))
         fw_fingerprints.append(fw_names)
 

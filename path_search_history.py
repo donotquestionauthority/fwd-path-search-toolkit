@@ -20,7 +20,6 @@ import os
 import urllib.request
 import urllib.error
 import urllib.parse
-import base64
 import time
 import importlib.util
 from datetime import datetime, timezone, timedelta
@@ -52,15 +51,16 @@ def read_config():
 
 
 def write_config(data):
+    """Merge data into the config file, preserving keys we don't own
+    (e.g. diffSavedSearches written by path_search_diff.py)."""
+    existing = read_config()
+    existing.update(data)
     with open(CONFIG_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+        json.dump(existing, f, indent=2)
 
-# Device types the API considers "firewall" across all platforms
-FIREWALL_TYPES = frozenset([
-    "FIREWALL",
-    "AWS_NETWORK_FIREWALL",
-    "AZURE_FIREWALL",
-])
+# Device types the API considers "firewall" across all platforms.
+# Imported from fwd_helpers so all tools agree on the set.
+FIREWALL_TYPES = _helpers.FIREWALL_TYPES
 
 
 def _load_discovery():

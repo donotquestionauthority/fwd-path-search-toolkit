@@ -199,14 +199,22 @@ def collect_credentials(credentials_dict, args, discovery_fn):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Snapshot helpers
+# Domain constants
 # ─────────────────────────────────────────────────────────────────────────────
 
-def snapshot_sort_key(snapshot):
-    """Sort key for snapshots: use createdAt (reflects data age for COLLECTION
-    snapshots); fall back to processedAt if absent."""
-    return snapshot.get("createdAt") or snapshot.get("processedAt") or ""
+# Device types the Forward Networks API treats as firewalls. Used by all tools
+# that detect or count firewall hops; importing from one place keeps cloud
+# firewalls (AWS_NETWORK_FIREWALL, AZURE_FIREWALL) from being silently missed.
+FIREWALL_TYPES = frozenset((
+    "FIREWALL",
+    "AWS_NETWORK_FIREWALL",
+    "AZURE_FIREWALL",
+))
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Snapshot helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 def get_snapshot_label(networks_data, network_id, snapshot_id):
     """Return a human-readable label for a snapshot ID.

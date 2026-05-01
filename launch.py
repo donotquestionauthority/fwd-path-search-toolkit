@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Forward Networks Path Search Toolkit — Launcher
-Starts all four tools and serves a home page at http://localhost:8760
+Starts all five tools and serves a home page at http://localhost:8760
 """
 
 import http.server
