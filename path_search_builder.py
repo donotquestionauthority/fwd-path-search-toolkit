@@ -804,7 +804,8 @@ function renderSnapshotDropdown(selectedSnapId) {
       const opt = document.createElement('option');
       opt.value = s.id;
       opt.textContent = s.label || s.id;
-      if (selectedSnapId && s.id === selectedSnapId) opt.selected = true;
+      if (s.ready === false) opt.disabled = true;
+      if (selectedSnapId && s.id === selectedSnapId && !opt.disabled) opt.selected = true;
       sel.appendChild(opt);
     });
   }

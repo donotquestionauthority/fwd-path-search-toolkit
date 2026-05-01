@@ -44,11 +44,14 @@ def discover_all(base_url, credentials):
     1. Call GET /api/networks to get all networks visible to this credential.
        (Use the first credential — all creds are for the same instance.)
     2. Filter to networks we have credentials for.
-    3. For each, call GET /api/networks/:id/snapshots, filter to PROCESSED,
-       sort by processedAt desc.
+    3. For each, call GET /api/networks/:id/snapshots, sort by createdAt desc
+       (newest data first). All snapshots are returned regardless of state;
+       non-PROCESSED ones get a "reprocessing required" label and ready=False
+       so consumers can show them but disable selection.
 
     Returns list of:
-      { "id": str, "name": str, "snapshots": [{"id": str, "label": str}] }
+      { "id": str, "name": str,
+        "snapshots": [{"id": str, "label": str, "ready": bool}] }
     """
     if not credentials:
         return []
@@ -97,29 +100,33 @@ def discover_all(base_url, credentials):
         snapshots = snap_data if isinstance(snap_data, list) \
                     else snap_data.get("snapshots", [])
 
-        # Filter to PROCESSED
-        processed = [s for s in snapshots if s.get("state") == "PROCESSED"]
-
-        # Sort by processedAt desc
-        processed.sort(key=lambda s: s.get("processedAt") or "", reverse=True)
+        # Sort by createdAt descending — newest data first.
+        # createdAt is when the snapshot's data was captured/imported and is
+        # the only date we expose. processedAt and processingTrigger are
+        # implementation details of the snapshot pipeline and are not used
+        # for ordering, labeling, or filtering anywhere in the toolkit.
+        snapshots.sort(key=lambda s: s.get("createdAt") or "", reverse=True)
 
         snap_list = []
-        for s in processed:
+        ready_count = 0
+        for s in snapshots:
             snap_id = s.get("id", "")
             if not snap_id:
                 continue
-            # Use createdAt for the timestamp — for COLLECTION snapshots this is
-            # when collection started (closest to actual data age).
-            # processedAt reflects when processing finished, which for imported
-            # snapshots is the import date, not the data date.
-            ts_raw = s.get("createdAt", "") or s.get("processedAt", "")
+            ts_raw = s.get("createdAt") or ""
             label  = ts_raw[:19].replace("T", " ") if ts_raw else snap_id
 
-            # Flag non-collection snapshots so imported/reprocessed ones are
-            # visually distinct — their createdAt may not reflect data age
-            trigger = s.get("processingTrigger", "")
-            if trigger and trigger not in ("COLLECTION", "UNKNOWN", ""):
-                label += f" [{trigger.lower()}]"
+            # A snapshot can be selected for path search only if it is fully
+            # processed. Anything else (PROCESSING, COLLECTING, FAILED, etc.)
+            # gets a clear "reprocessing required" tag and is marked not-ready
+            # so the UI can disable the option rather than letting the user
+            # pick something the API won't accept.
+            state = (s.get("state") or "").upper()
+            ready = (state == "PROCESSED")
+            if not ready:
+                label += " [reprocessing required]"
+            else:
+                ready_count += 1
 
             if s.get("note"):
                 label += f" — {s['note']}"
@@ -127,9 +134,13 @@ def discover_all(base_url, credentials):
             # Append short snapshot ID for cross-reference
             label += f"  ({snap_id[-8:]})"
 
-            snap_list.append({"id": snap_id, "label": label})
+            snap_list.append({"id": snap_id, "label": label, "ready": ready})
 
-        print(f"{len(snap_list)} processed snapshot(s)")
+        total = len(snap_list)
+        if total == ready_count:
+            print(f"{total} snapshot(s)")
+        else:
+            print(f"{total} snapshot(s) ({ready_count} ready, {total - ready_count} not ready)")
         networks.append({"id": net_id, "name": name, "snapshots": snap_list})
 
     return networks

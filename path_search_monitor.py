@@ -76,45 +76,16 @@ def write_monitor_data(data):
 def run_path_search(network_id, snapshot_id, src_ip, dst_ip,
                     intent=None, ip_proto=None, dst_port=None,
                     max_candidates=None, max_results=1, max_seconds=30):
-    params = {
-        "srcIp":      src_ip,
-        "dstIp":      dst_ip,
-        "maxResults": str(max_results),
-        "maxSeconds": str(max_seconds),
-        "snapshotId": snapshot_id,
-    }
-    if max_candidates:  params["maxCandidates"] = str(max_candidates)
-    if intent:          params["intent"]         = intent
-    if ip_proto:        params["ipProto"]        = str(ip_proto)
-    if dst_port:        params["dstPort"]        = str(dst_port)
-
-    if network_id not in CREDENTIALS:
-        return None, None, 0, f"No credentials for network {network_id}"
-
-    qs  = urllib.parse.urlencode(params)
-    url = f"{BASE_URL.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", CREDENTIALS[network_id])
-    req.add_header("Accept", "application/json")
-
-    t0 = time.time()
-    for attempt in range(2):
-        try:
-            with urllib.request.urlopen(req, timeout=max_seconds + _helpers.API_TIMEOUT_S) as resp:
-                body = json.loads(resp.read().decode("utf-8"))
-                return resp.status, body, round((time.time() - t0) * 1000), None
-        except urllib.error.HTTPError as e:
-            raw = e.read().decode("utf-8")
-            elapsed = round((time.time() - t0) * 1000)
-            try:    body = json.loads(raw)
-            except: body = {"_raw": raw}
-            return e.code, body, elapsed, f"HTTP {e.code}"
-        except Exception as ex:
-            if attempt == 0:
-                time.sleep(3)
-                continue
-            return None, None, round((time.time() - t0) * 1000), str(ex)
-    return None, None, 0, "Unknown error"
+    """Monitor-tool wrapper around the consolidated helper. Uses module-level
+    BASE_URL and CREDENTIALS. intent/max_candidates may be None — those are
+    omitted from the URL so the server's defaults apply (matches the original
+    monitor behavior)."""
+    return _helpers.run_path_search(
+        BASE_URL, CREDENTIALS, network_id, snapshot_id, src_ip, dst_ip,
+        intent=intent,
+        max_candidates=max_candidates, max_results=max_results, max_seconds=max_seconds,
+        ip_proto=ip_proto, dst_port=dst_port,
+    )
 
 
 def analyze_path_result(body):
@@ -313,18 +284,23 @@ def build_monitoring_note(case_id, jira_id):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def get_snapshots_after(network_id, baseline_snapshot_id):
-    """Return list of PROCESSED snapshots after the baseline, oldest first."""
+    """Return list of ready snapshots created after the baseline, oldest first.
+
+    Snapshot dicts in NETWORKS_DATA come from fwd_discovery.discover_all and
+    have shape {"id", "label", "ready"}. The label is "<createdAt> [...]
+    (id-suffix)" so its lexical order matches createdAt order — sufficient
+    for sorting without re-fetching the API.
+
+    Only ready (PROCESSED) snapshots are returned; not-ready snapshots can't
+    be path-searched so there's nothing to check against them.
+    """
     if network_id not in CREDENTIALS:
         return []
     for net in NETWORKS_DATA:
         if net["id"] == network_id:
-            snaps = [s for s in net.get("snapshots", [])
-                     if s.get("state") == "PROCESSED"]
-            # Sort oldest first by processedAt / createdAt
-            def snap_ts(s):
-                return s.get("createdAt") or s.get("processedAt") or ""
-            snaps.sort(key=snap_ts)
-            # Find baseline index and return everything after
+            snaps = [s for s in net.get("snapshots", []) if s.get("ready", True)]
+            # Sort oldest first by label (label starts with createdAt timestamp)
+            snaps.sort(key=lambda s: s.get("label", ""))
             ids = [s["id"] for s in snaps]
             if baseline_snapshot_id in ids:
                 idx = ids.index(baseline_snapshot_id)
@@ -988,10 +964,18 @@ function onNetworkChange() {
   sel.innerHTML = '<option value="">— select snapshot —</option>';
   if (idx === '') return;
   const net = discoveredNetworks[parseInt(idx)];
-  (net.snapshots || []).forEach((s, i) => {
+  let firstReadySeen = false;
+  (net.snapshots || []).forEach((s) => {
     const opt       = document.createElement('option');
     opt.value       = s.id;
-    opt.textContent = (s.label || s.id) + (i === 0 ? ' (latest)' : '');
+    const isReady   = s.ready !== false;
+    let text        = s.label || s.id;
+    if (isReady && !firstReadySeen) {
+      text += ' (latest)';
+      firstReadySeen = true;
+    }
+    opt.textContent = text;
+    if (!isReady) opt.disabled = true;
     sel.appendChild(opt);
   });
 }

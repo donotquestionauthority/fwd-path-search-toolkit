@@ -45,58 +45,32 @@ def _load_discovery():
 
 def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
                     intent, max_candidates, ip_proto, dst_port, max_seconds=300):
-    """Run a single path search and return (status, body, elapsed_ms)."""
-    params = {
-        "srcIp":         src_ip,
-        "dstIp":         dst_ip,
-        "intent":        intent,
-        "maxCandidates": str(max_candidates),
-        "maxResults":    str(max_candidates),
-        "maxSeconds":    str(max_seconds),
-    }
-    if ip_proto:
-        params["ipProto"] = str(ip_proto)
-    if dst_port:
-        params["dstPort"] = str(dst_port)
-    if snapshot_id:
-        params["snapshotId"] = snapshot_id
-
-    qs   = urllib.parse.urlencode(params)
-    url  = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
-
-    if network_id not in CREDENTIALS:
-        return None, f"No credentials for network {network_id}", 0
-
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", CREDENTIALS[network_id])
-    req.add_header("Accept", "application/json")
-
-    t0 = time.time()
-    last_err = None
-    for attempt in range(2):
-        if attempt > 0:
-            time.sleep(3)
-        try:
-            with urllib.request.urlopen(req, timeout=max_seconds + _helpers.API_TIMEOUT_S) as resp:
-                body   = resp.read().decode("utf-8")
-                status = resp.status
-            return status, body, round((time.time() - t0) * 1000)
-        except urllib.error.HTTPError as e:
-            body   = e.read().decode("utf-8")
-            status = e.code
-            return status, body, round((time.time() - t0) * 1000)
-        except Exception as ex:
-            last_err = str(ex)
-
-    return None, last_err, round((time.time() - t0) * 1000)
+    """Compare-tool wrapper around the consolidated helper. The matrix tester
+    needs all paths the API found, so max_results is set equal to
+    max_candidates. Returns (status, body_dict_or_error_str, elapsed_ms)."""
+    status, body, elapsed_ms, err = _helpers.run_path_search(
+        base_url, CREDENTIALS, network_id, snapshot_id, src_ip, dst_ip,
+        intent=intent,
+        max_candidates=max_candidates, max_results=max_candidates, max_seconds=max_seconds,
+        ip_proto=ip_proto, dst_port=dst_port,
+    )
+    if status is None:
+        # Surface the error string in slot 2 so the existing caller's
+        # `if status is None: result = {'error': body, ...}` keeps working.
+        return None, err or "Path search failed", elapsed_ms
+    return status, body, elapsed_ms
 
 
 def analyze_paths(body, consensus_threshold):
-    """Parse path search response and return analysis dict."""
-    try:
-        parsed = json.loads(body)
-    except Exception:
-        return {"error": "Invalid JSON response"}
+    """Parse path search response and return analysis dict.
+    Accepts either a parsed dict (preferred) or a JSON string (legacy)."""
+    if isinstance(body, str):
+        try:
+            parsed = json.loads(body)
+        except Exception:
+            return {"error": "Invalid JSON response"}
+    else:
+        parsed = body or {}
 
     paths      = (parsed.get("info") or {}).get("paths") or []
     total_hits = (parsed.get("info") or {}).get("totalHits", {})
@@ -449,6 +423,7 @@ function onNetworkSelect() {
     (net.snapshots || []).forEach(s => {
       const opt = document.createElement('option');
       opt.value = s.id; opt.textContent = s.label || s.id;
+      if (s.ready === false) opt.disabled = true;
       sel.appendChild(opt);
     });
   } else {

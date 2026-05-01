@@ -304,12 +304,18 @@ def _log_api_outcome(url, attempts, final_err, http_status, ok_after_retry):
 
 
 def _reset_run_state():
-    """Clear per-run caches at the start of /run-diff and /run-diff-stream."""
+    """Clear per-run caches at the start of /run-diff and /run-diff-stream.
+    Clearing _topo_cache here bounds its memory growth — the cache only
+    needs to span one run (it shares topology between the run's setup phase
+    and per-device analysis within that same run). Retry of a single device
+    after the run completes still works because _topo_cache is preserved
+    between runs."""
     with _failure_log_lock:
         _failure_log.clear()
     with _partial_results_lock:
         _partial_results.clear()
     _file_name_cache.clear()
+    _topo_cache.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -456,42 +462,15 @@ def api_get(base_url, network_id, path, params=None, timeout=None, text=False,
 
 def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
                     intent, max_candidates, max_results, ip_proto, dst_port, max_seconds=30):
-    params = {
-        "srcIp":         src_ip,
-        "dstIp":         dst_ip,
-        "intent":        intent,
-        "maxCandidates": str(max_candidates),
-        "maxResults":    str(max_results),
-        "maxSeconds":    str(max_seconds),
-        "snapshotId":    snapshot_id,
-    }
-    if ip_proto:
-        params["ipProto"] = str(ip_proto)
-    if dst_port:
-        params["dstPort"] = str(dst_port)
-    if network_id not in CREDENTIALS:
-        return None, None, 0, f"No credentials for network {network_id}"
-    qs  = urllib.parse.urlencode(params)
-    url = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", CREDENTIALS[network_id])
-    req.add_header("Accept", "application/json")
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=max_seconds + _helpers.API_TIMEOUT_S) as resp:
-            body    = json.loads(resp.read().decode("utf-8"))
-            elapsed = round((time.time() - t0) * 1000)
-            return resp.status, body, elapsed, None
-    except urllib.error.HTTPError as e:
-        raw     = e.read().decode("utf-8")
-        elapsed = round((time.time() - t0) * 1000)
-        try:
-            body = json.loads(raw)
-        except Exception:
-            body = {"_raw": raw}
-        return e.code, body, elapsed, f"HTTP {e.code}"
-    except Exception as ex:
-        return None, None, round((time.time() - t0) * 1000), str(ex)
+    """Diff-tool wrapper around the consolidated helper. Gains the helper's
+    1-retry transient-error handling, which the previous inline implementation
+    didn't have."""
+    return _helpers.run_path_search(
+        base_url, CREDENTIALS, network_id, snapshot_id, src_ip, dst_ip,
+        intent=intent,
+        max_candidates=max_candidates, max_results=max_results, max_seconds=max_seconds,
+        ip_proto=ip_proto, dst_port=dst_port,
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1283,11 +1262,15 @@ function onNetChange() {
       const o = document.createElement('option');
       o.value = s.id;
       o.textContent = s.label || s.id;
+      if (s.ready === false) o.disabled = true;
       sel.appendChild(o);
     });
   });
-  if (snaps.length >= 1) document.getElementById('sel-snap-w').value = snaps[0].id;
-  if (snaps.length >= 2) document.getElementById('sel-snap-b').value = snaps[1].id;
+  // Default-select the first two READY snapshots so the user lands on a
+  // usable pair (skipping anything in 'reprocessing required' state).
+  const readySnaps = snaps.filter(s => s.ready !== false);
+  if (readySnaps.length >= 1) document.getElementById('sel-snap-w').value = readySnaps[0].id;
+  if (readySnaps.length >= 2) document.getElementById('sel-snap-b').value = readySnaps[1].id;
 }
 
 function syncFilter(src) {

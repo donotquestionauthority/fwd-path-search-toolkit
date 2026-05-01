@@ -102,13 +102,12 @@ def list_processed_snapshots(base_url, network_id, days_back):
     Fetch all PROCESSED snapshots for a network within the last `days_back` days.
     Returns list of SnapshotInfo dicts, oldest first, filtered to the date window.
 
-    Date filtering uses createdAt for COLLECTION snapshots (reflects when the data
-    was captured) and processedAt for non-COLLECTION snapshots (import/reprocess/fork).
-    This matches fwd_helpers.snapshot_sort_key and fwd_discovery label logic.
-
-    Using processedAt for COLLECTION snapshots caused old snapshots that were
-    reprocessed recently to appear inside the date window with the reprocess date,
-    producing duplicate apparent dates for the same calendar day.
+    Date filtering uses createdAt — when the snapshot's data was captured.
+    processedAt and processingTrigger are not consulted: how a snapshot was
+    produced (import / reprocess / fork) doesn't change what data it shows,
+    so a 2024 snapshot reprocessed yesterday should NOT surface in a recent
+    audit window. Snapshots that aren't fully processed are skipped because
+    their path search results would be unreliable.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days_back)
     params = {"state": "PROCESSED", "limit": "500"}
@@ -121,16 +120,9 @@ def list_processed_snapshots(base_url, network_id, days_back):
 
     result = []
     for s in snapshots:
-        trigger = (s.get("trigger") or "").upper()
-        # For COLLECTION snapshots use createdAt — this is when the data was
-        # captured. processedAt reflects when processing finished, which changes
-        # on every reprocess and does not represent data age.
-        # For non-COLLECTION snapshots (import/reprocess/fork) fall back to
-        # processedAt as createdAt may not reflect data age either.
-        if trigger in ("COLLECTION", "UNKNOWN", ""):
-            ts_str = s.get("createdAt") or s.get("processedAt")
-        else:
-            ts_str = s.get("processedAt") or s.get("createdAt")
+        if (s.get("state") or "").upper() != "PROCESSED":
+            continue
+        ts_str = s.get("createdAt")
         if not ts_str:
             continue
         try:
@@ -141,7 +133,6 @@ def list_processed_snapshots(base_url, network_id, days_back):
         if ts >= cutoff:
             result.append({
                 "id":          s["id"],
-                "processedAt": s.get("processedAt", ts_str),
                 "ts":          ts.isoformat(),
                 "label":       ts.strftime("%Y-%m-%d %H:%M UTC"),
                 "date":        ts.strftime("%Y-%m-%d"),
@@ -154,50 +145,13 @@ def list_processed_snapshots(base_url, network_id, days_back):
 
 def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
                     intent, max_candidates, max_results, ip_proto, dst_port, max_seconds=30):
-    """
-    Run a path search for a specific snapshot.
-    Returns (status, parsed_body_dict_or_None, elapsed_ms, error_or_None)
-    """
-    params = {
-        "srcIp":         src_ip,
-        "dstIp":         dst_ip,
-        "intent":        intent,
-        "maxCandidates": str(max_candidates),
-        "maxResults":    str(max_results),
-        "maxSeconds":    str(max_seconds),
-        "snapshotId":    snapshot_id,
-    }
-    if ip_proto:
-        params["ipProto"] = str(ip_proto)
-    if dst_port:
-        params["dstPort"] = str(dst_port)
-
-    if network_id not in CREDENTIALS:
-        return None, None, 0, f"No credentials for network {network_id}"
-
-    qs  = urllib.parse.urlencode(params)
-    url = f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
-    req = urllib.request.Request(url)
-    req.add_header("Authorization", CREDENTIALS[network_id])
-    req.add_header("Accept", "application/json")
-
-    t0 = time.time()
-    try:
-        with urllib.request.urlopen(req, timeout=max_seconds + _helpers.API_TIMEOUT_S) as resp:
-            body   = json.loads(resp.read().decode("utf-8"))
-            status = resp.status
-    except urllib.error.HTTPError as e:
-        raw  = e.read().decode("utf-8")
-        elapsed = round((time.time() - t0) * 1000)
-        try:
-            body = json.loads(raw)
-        except Exception:
-            body = {"_raw": raw}
-        return e.code, body, elapsed, f"HTTP {e.code}"
-    except Exception as ex:
-        return None, None, round((time.time() - t0) * 1000), str(ex)
-
-    return status, body, round((time.time() - t0) * 1000), None
+    """History-tool wrapper. Single retry on transient errors via the helper."""
+    return _helpers.run_path_search(
+        base_url, CREDENTIALS, network_id, snapshot_id, src_ip, dst_ip,
+        intent=intent,
+        max_candidates=max_candidates, max_results=max_results, max_seconds=max_seconds,
+        ip_proto=ip_proto, dst_port=dst_port,
+    )
 
 
 def normalize_fw_name(name, normalize_peers):
@@ -1715,19 +1669,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     base_url, net_id, snap_id, src_ip, dst_ip,
                     intent, max_cand, max_results, ip_proto, dst_port, max_sec
                 )
-
-                # Retry once on socket-level errors (timeout, connection reset, etc.)
-                # These are transient — the API runs fine when called individually.
-                if err and body is None:
-                    time.sleep(3)
-                    status2, body2, elapsed_ms2, err2 = run_path_search(
-                        base_url, net_id, snap_id, src_ip, dst_ip,
-                        intent, max_cand, max_results, ip_proto, dst_port, max_sec
-                    )
-                    if body2 is not None:
-                        status, body, elapsed_ms, err = status2, body2, elapsed_ms + elapsed_ms2, err2
-                    else:
-                        err = f"{err} (retried: {err2})"
+                # Transient retry happens inside the helper; if err is set
+                # here, the retry already exhausted.
 
                 if err and body is None:
                     result = {
