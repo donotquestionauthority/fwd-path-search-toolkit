@@ -13,9 +13,14 @@ Import with:
 
 import base64
 import http.server
+import json
 import os
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -226,6 +231,115 @@ def get_snapshot_label(networks_data, network_id, snapshot_id):
                 if s["id"] == snapshot_id:
                     return s.get("label") or snapshot_id[-8:]
     return snapshot_id[-8:]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Path search
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_path_search_url(base_url, network_id, snapshot_id, src_ip, dst_ip,
+                          intent="PREFER_DELIVERED",
+                          max_candidates=5000, max_results=1, max_seconds=30,
+                          ip_proto=None, dst_port=None):
+    """Construct the full Path Search API URL (with query string) without
+    issuing the request. Used by tools that need to display or copy the URL
+    in addition to executing the search.
+
+    intent may be None or empty to omit it from the URL — the API will use
+    its server-side default in that case.
+    max_candidates may be None to omit it (server-side default applies).
+    """
+    params = {
+        "srcIp":      src_ip,
+        "dstIp":      dst_ip,
+        "maxResults": str(max_results),
+        "maxSeconds": str(max_seconds),
+    }
+    if intent:
+        params["intent"] = intent
+    if max_candidates:
+        params["maxCandidates"] = str(max_candidates)
+    if snapshot_id:
+        params["snapshotId"] = snapshot_id
+    if ip_proto:
+        params["ipProto"] = str(ip_proto)
+    if dst_port:
+        params["dstPort"] = str(dst_port)
+    qs = urllib.parse.urlencode(params)
+    return f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
+
+
+def run_path_search(base_url, credentials, network_id, snapshot_id,
+                    src_ip, dst_ip,
+                    intent="PREFER_DELIVERED",
+                    max_candidates=5000, max_results=1, max_seconds=30,
+                    ip_proto=None, dst_port=None,
+                    retries=1, retry_delay=3):
+    """Run a Forward Networks Path Search API call.
+
+    Single point of truth for path search across the toolkit. The socket
+    timeout is `max_seconds + API_TIMEOUT_S` so the socket outlives the
+    server-side search budget. Transient socket failures are retried with
+    a fixed delay; HTTP errors (4xx/5xx) are returned immediately.
+
+    Args:
+      base_url:       Forward Networks instance URL (e.g. "https://fwd.app")
+      credentials:    dict {network_id: "Basic <base64>"}; the caller's
+                      module-level CREDENTIALS dict is passed in directly so
+                      this helper holds no state of its own.
+      network_id:     str, must be a key in `credentials`
+      snapshot_id:    str (optional — pass empty/None to use the live network)
+      src_ip, dst_ip: required IPs
+      intent:         "PREFER_DELIVERED" | "PREFER_VIOLATIONS" | "VIOLATIONS_ONLY"
+      retries:        number of additional attempts on transient failure
+                      (0 disables retry; default 1 = 2 attempts total)
+      retry_delay:    seconds to sleep between attempts
+
+    Returns:
+      (status, body_dict_or_None, elapsed_ms, error_or_None)
+
+      - On success: (status_code, parsed_json_dict, ms, None)
+      - On HTTP 4xx/5xx: (status_code, parsed_body_or_{"_raw": text}, ms, "HTTP {code}")
+      - On transient failure with retries exhausted: (None, None, ms, str(exception))
+      - On missing credentials: (None, None, 0, "No credentials for network {id}")
+    """
+    if network_id not in credentials:
+        return None, None, 0, f"No credentials for network {network_id}"
+
+    url = build_path_search_url(
+        base_url, network_id, snapshot_id, src_ip, dst_ip,
+        intent=intent,
+        max_candidates=max_candidates, max_results=max_results, max_seconds=max_seconds,
+        ip_proto=ip_proto, dst_port=dst_port,
+    )
+    req = urllib.request.Request(url)
+    req.add_header("Authorization", credentials[network_id])
+    req.add_header("Accept", "application/json")
+
+    socket_timeout = max_seconds + API_TIMEOUT_S
+    t0 = time.time()
+    last_err = None
+
+    for attempt in range(1 + retries):
+        try:
+            with urllib.request.urlopen(req, timeout=socket_timeout) as resp:
+                body = json.loads(resp.read().decode("utf-8"))
+                return resp.status, body, round((time.time() - t0) * 1000), None
+        except urllib.error.HTTPError as e:
+            # HTTP errors are definitive — don't retry.
+            raw = e.read().decode("utf-8", errors="replace")
+            try:
+                body = json.loads(raw)
+            except Exception:
+                body = {"_raw": raw}
+            return e.code, body, round((time.time() - t0) * 1000), f"HTTP {e.code}"
+        except Exception as ex:
+            last_err = str(ex)
+            if attempt < retries:
+                time.sleep(retry_delay)
+            continue
+
+    return None, None, round((time.time() - t0) * 1000), last_err
 
 
 # ─────────────────────────────────────────────────────────────────────────────
