@@ -204,8 +204,13 @@ SYNTHETIC_PREFIXES = ("internet ", "MPLS-", "MPLS_")
 _topo_cache    = {}
 _file_name_cache = set()  # unique file names seen across last run
 ANALYSIS_POOL_SIZE  = 10   # concurrent device analysis workers
-DEVICE_TIMEOUT_S    = _helpers.API_TIMEOUT_S   # max seconds to wait for a single device analysis
-FILE_FETCH_TIMEOUT_S = _helpers.API_TIMEOUT_S  # max seconds to wait for a single file fetch
+# Outer ceilings must exceed API_TIMEOUT_S × (1 + api_get retries) so that
+# api_get's transient-error retry chain (2 retries with 2s/4s backoff) can
+# actually run to completion before the outer pool cancels the future.
+# Worst-case single-call retry chain ≈ 150 + 2 + 150 + 4 + 150 = ~456s, so
+# DEVICE_TIMEOUT_S must clear that, plus headroom for file-pool work.
+DEVICE_TIMEOUT_S    = _helpers.API_TIMEOUT_S * 4   # max seconds to wait for a single device analysis
+FILE_FETCH_TIMEOUT_S = _helpers.API_TIMEOUT_S * 3  # max seconds to wait for a single file fetch
 
 
 # ─────────────────────────────────────────────────────────────────────────────
