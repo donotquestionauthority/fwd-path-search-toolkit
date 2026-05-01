@@ -25,14 +25,16 @@ import threading
 import json
 import os
 import re
+import io
+import zipfile
 import urllib.request
 import urllib.parse
 import urllib.error
-import base64
 import time
 import difflib
 import importlib.util
 import concurrent.futures
+from datetime import datetime, timezone
 
 def _load_helpers():
     import importlib.util as _ilu
@@ -211,6 +213,103 @@ ANALYSIS_POOL_SIZE  = 10   # concurrent device analysis workers
 # DEVICE_TIMEOUT_S must clear that, plus headroom for file-pool work.
 DEVICE_TIMEOUT_S    = _helpers.API_TIMEOUT_S * 4   # max seconds to wait for a single device analysis
 FILE_FETCH_TIMEOUT_S = _helpers.API_TIMEOUT_S * 3  # max seconds to wait for a single file fetch
+# After the per-future deadlines pass, give in-flight fetches a brief grace
+# period to finish naturally before declaring the wave done. Many "timeouts"
+# are calls that are 1-2s from completion when the outer deadline hits.
+GRACE_PERIOD_S      = 30
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Failure log — captures every API call that ultimately failed, plus calls
+# that succeeded only after retry. Cleared at the start of each /run-diff
+# stream. Read by /export-failure-log to produce a downloadable bundle.
+#
+# Each entry: {
+#   "timestamp":          ISO8601,
+#   "device":             str or None,
+#   "phase":              "metadata" | "topology" | "files" | "file_content" | "path_search" | "other",
+#   "snapshot":           str or None,
+#   "url":                full GET URL (with query string),
+#   "method":             "GET",
+#   "outcome":            "failed" | "ok_after_retry",
+#   "error_class":        "timeout" | "transient" | "http_4xx" | "http_5xx" | "other",
+#   "error":              short error message,
+#   "attempts":           int (number of attempts made before giving up or succeeding),
+# }
+# ─────────────────────────────────────────────────────────────────────────────
+_failure_log         = []
+_failure_log_lock    = threading.Lock()
+# Thread-local context so api_get can attribute a failure to the right device
+# and phase without having to thread those through every call site.
+_api_context         = threading.local()
+
+# Partial-result store — analyze_device writes to this dict at the end of each
+# of its three phases (metadata/topology/files) so that if the outer pool
+# times out the device's future, the wave-end sweep can still surface what
+# completed instead of an empty stub.
+# Key: device name. Value: dict with whatever phases finished.
+# Cleared at the start of each /run-diff stream.
+_partial_results      = {}
+_partial_results_lock = threading.Lock()
+
+
+def _set_api_context(device=None, phase=None, snapshot=None):
+    """Set thread-local context so api_get failures get attributed correctly."""
+    _api_context.device   = device
+    _api_context.phase    = phase
+    _api_context.snapshot = snapshot
+
+
+def _classify_error(err_msg, http_status=None):
+    """Map a raw error string or HTTP status to a coarse error_class."""
+    if http_status is not None:
+        if 400 <= http_status < 500:
+            return "http_4xx"
+        if 500 <= http_status < 600:
+            return "http_5xx"
+    if not err_msg:
+        return "other"
+    e = err_msg.lower()
+    if "timed out" in e or "timeout" in e:
+        return "timeout"
+    if "ssl" in e or "eof" in e or "reset" in e or "connection" in e or "broken pipe" in e:
+        return "transient"
+    return "other"
+
+
+def _log_api_outcome(url, attempts, final_err, http_status, ok_after_retry):
+    """Record an api_get outcome to _failure_log. Records two cases:
+       - ultimate failure (final_err is set or http_status is non-2xx)
+       - eventual success after one or more failed attempts (ok_after_retry).
+       Calls that succeed on the first attempt are not logged.
+    """
+    if not (final_err or ok_after_retry or (http_status and http_status >= 400)):
+        return
+    outcome = "ok_after_retry" if ok_after_retry and not final_err and (
+        http_status is None or http_status < 400
+    ) else "failed"
+    entry = {
+        "timestamp":   datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "device":      getattr(_api_context, "device", None),
+        "phase":       getattr(_api_context, "phase", None),
+        "snapshot":    getattr(_api_context, "snapshot", None),
+        "url":         url,
+        "method":      "GET",
+        "outcome":     outcome,
+        "error_class": _classify_error(final_err, http_status),
+        "error":       final_err or (f"HTTP {http_status}" if http_status and http_status >= 400 else ""),
+        "attempts":    attempts,
+    }
+    with _failure_log_lock:
+        _failure_log.append(entry)
+
+
+def _reset_run_state():
+    """Clear per-run caches at the start of /run-diff and /run-diff-stream."""
+    with _failure_log_lock:
+        _failure_log.clear()
+    with _partial_results_lock:
+        _partial_results.clear()
+    _file_name_cache.clear()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -305,7 +404,12 @@ def _ensure_filters_file():
 
 def api_get(base_url, network_id, path, params=None, timeout=None, text=False,
             _retries=2, _backoff=2.0):
-    """GET wrapper with retry on transient errors (SSL EOF, connection reset, timeout)."""
+    """GET wrapper with retry on transient errors (SSL EOF, connection reset, timeout).
+
+    On every final outcome (success-after-retry, transient failure exhausted,
+    HTTP 4xx/5xx) writes a record to the failure log via _log_api_outcome.
+    First-attempt successes are not logged.
+    """
     if timeout is None:
         timeout = _helpers.API_TIMEOUT_S
     if network_id not in CREDENTIALS:
@@ -317,27 +421,36 @@ def api_get(base_url, network_id, path, params=None, timeout=None, text=False,
     req.add_header("Accept", "text/plain, application/json" if text else "application/json")
 
     last_err = None
+    attempts_made = 0
     for attempt in range(1 + _retries):
+        attempts_made = attempt + 1
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 raw = resp.read()
+                # Successful response — log only if we needed retries to get here
+                if attempt > 0:
+                    _log_api_outcome(url, attempts_made, None, resp.status, ok_after_retry=True)
                 if text:
                     return resp.status, raw.decode("utf-8", errors="replace"), None
                 return resp.status, json.loads(raw.decode("utf-8")), None
         except urllib.error.HTTPError as e:
-            # HTTP errors (4xx/5xx) are definitive — don't retry
+            # HTTP errors (4xx/5xx) are definitive — don't retry, but do log
             body = e.read().decode("utf-8", errors="replace")
             try:
                 msg = json.loads(body).get("message", body)
             except Exception:
                 msg = body[:300]
-            return e.code, None, f"HTTP {e.code}: {msg}"
+            err_str = f"HTTP {e.code}: {msg}"
+            _log_api_outcome(url, attempts_made, err_str, e.code, ok_after_retry=False)
+            return e.code, None, err_str
         except Exception as ex:
             last_err = str(ex)
             if attempt < _retries:
                 time.sleep(_backoff * (attempt + 1))
             continue
 
+    # All retries exhausted
+    _log_api_outcome(url, attempts_made, last_err, None, ok_after_retry=False)
     return None, None, last_err
 
 
@@ -566,20 +679,30 @@ def analyze_device(base_url, network_id, device_name,
                    topo_working, topo_broken,
                    filter_name, filters):
     result = {
-        "deviceName": device_name,
-        "synthetic":  is_synthetic(device_name),
-        "metadata":   {"rows": [], "any_changed": False},
-        "topology":   {"rows": [], "lost_count": 0, "new_count": 0, "any_changed": False},
-        "files":      [],
-        "errors":     [],
-        "severity":   "clean",
+        "deviceName":        device_name,
+        "synthetic":         is_synthetic(device_name),
+        "metadata":          {"rows": [], "any_changed": False},
+        "topology":          {"rows": [], "lost_count": 0, "new_count": 0, "any_changed": False},
+        "files":             [],
+        "errors":            [],
+        "severity":          "clean",
+        "phases_completed":  [],   # which of metadata/topology/files finished
     }
+
+    def _checkpoint():
+        """Snapshot current result into _partial_results so the outer pool can
+        recover what completed if this device's future is later cancelled."""
+        with _partial_results_lock:
+            # Shallow copy is enough — caller never mutates phase dicts after writing
+            _partial_results[device_name] = dict(result)
 
     if result["synthetic"]:
         return result
 
     # ── 1. Metadata ──────────────────────────────────────────────────────────
+    _set_api_context(device=device_name, phase="metadata", snapshot=snap_working)
     meta_w, err_w = get_device_meta(base_url, network_id, device_name, snap_working)
+    _set_api_context(device=device_name, phase="metadata", snapshot=snap_broken)
     meta_b, err_b = get_device_meta(base_url, network_id, device_name, snap_broken)
     if err_w: result["errors"].append(f"metadata (working): {err_w}")
     if err_b: result["errors"].append(f"metadata (broken): {err_b}")
@@ -601,8 +724,12 @@ def analyze_device(base_url, network_id, device_name,
         "raw_working": meta_w,
         "raw_broken":  meta_b,
     }
+    result["phases_completed"].append("metadata")
+    _checkpoint()
 
     # ── 2. Topology ───────────────────────────────────────────────────────────
+    # Topology is computed from already-fetched per-snapshot graphs, so no
+    # API context is needed here — but track the phase for partial-result UX.
     links_w = filter_topology_for_device(topo_working, device_name)
     links_b = filter_topology_for_device(topo_broken,  device_name)
 
@@ -625,9 +752,13 @@ def analyze_device(base_url, network_id, device_name,
         "new_count":   len(only_b),
         "any_changed": bool(only_w or only_b),
     }
+    result["phases_completed"].append("topology")
+    _checkpoint()
 
     # ── 3. Files ──────────────────────────────────────────────────────────────
+    _set_api_context(device=device_name, phase="files", snapshot=snap_working)
     files_w, err_fw = get_device_files(base_url, network_id, device_name, snap_working)
+    _set_api_context(device=device_name, phase="files", snapshot=snap_broken)
     files_b, err_fb = get_device_files(base_url, network_id, device_name, snap_broken)
     if err_fw: result["errors"].append(f"file list (working): {err_fw}")
     if err_fb: result["errors"].append(f"file list (broken): {err_fb}")
@@ -650,7 +781,9 @@ def analyze_device(base_url, network_id, device_name,
         in_b  = fname in names_b
         noisy = fname in NOISY_FILES
         if in_w and in_b:
+            _set_api_context(device=device_name, phase="file_content", snapshot=snap_working)
             content_w, cerr_w = get_file_content(base_url, network_id, device_name, fname, snap_working)
+            _set_api_context(device=device_name, phase="file_content", snapshot=snap_broken)
             content_b, cerr_b = get_file_content(base_url, network_id, device_name, fname, snap_broken)
             if cerr_w or cerr_b:
                 return {"name": fname, "status": "error",
@@ -706,6 +839,8 @@ def analyze_device(base_url, network_id, device_name,
 
     file_results.sort(key=file_sort)
     result["files"] = file_results
+    result["phases_completed"].append("files")
+    _checkpoint()
 
     # ── Severity ──────────────────────────────────────────────────────────────
     has_coll_err  = any(r["field"] in ("collectionError","processingError") and r["changed"]
@@ -780,8 +915,20 @@ HTML = r"""<!DOCTYPE html>
   .sev{font-size:0.58rem;font-weight:700;padding:1px 5px;border-radius:3px;flex-shrink:0;min-width:20px;text-align:center}
   .sev-error{background:var(--error);color:#000}.sev-warn{background:var(--warn);color:#000}
   .sev-info{background:var(--info);color:#000}
+  .sev-timeout{background:var(--warn);color:#000;outline:1px dashed #000}
   .sev-clean{background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
   .sev-pending{background:var(--surface2);color:var(--muted);border:1px solid var(--border)}
+  .timeout-banner{background:rgba(210, 153, 34, 0.10);border:1px solid var(--warn);
+                  border-radius:var(--radius);padding:10px 12px;margin:0 0 12px 0}
+  .timeout-banner-title{color:var(--warn);font-weight:700;font-size:0.74rem;margin-bottom:4px}
+  .timeout-banner-body{color:var(--text);font-size:0.7rem;line-height:1.5}
+  .btn-retry{margin-left:8px;background:var(--warn);color:#000;border:none;padding:4px 10px;
+             border-radius:var(--radius);font-family:inherit;font-size:0.66rem;font-weight:700;cursor:pointer}
+  .btn-retry:hover{filter:brightness(1.1)}
+  .btn-warn{background:var(--warn) !important;color:#000 !important}
+  .phase-skipped{background:var(--surface2);border:1px dashed var(--border);
+                 padding:8px 12px;margin:8px 0;border-radius:var(--radius);
+                 color:var(--muted);font-size:0.68rem;font-style:italic}
   .right-pane{flex:1;min-height:0;display:flex;flex-direction:column;overflow:hidden}
   .right-header{padding:10px 20px 8px;border-bottom:1px solid var(--border);flex-shrink:0;display:flex;align-items:center;gap:10px}
   .right-title{font-size:0.7rem;font-weight:700;color:var(--accent);letter-spacing:.1em}
@@ -1026,6 +1173,8 @@ HTML = r"""<!DOCTYPE html>
           <button class="btn-sm" onclick="clearAll()">&#x2715; Clear</button>
           <a id="export-file-list-btn" href="/export-file-list" download="diff_file_list.txt"
              class="btn-sm" style="display:none;text-decoration:none">&#x2b07; Export File List</a>
+          <a id="export-failure-log-btn" href="/export-failure-log"
+             class="btn-sm btn-warn" style="display:none;text-decoration:none">&#x26a0; Export failure log</a>
           <span id="run-status" style="font-size:0.68rem;color:var(--muted)"></span>
         </div>
       </div>
@@ -1264,6 +1413,8 @@ function clearAll() {
   document.getElementById('back-btn').style.display = 'none';
   const _expBtn = document.getElementById('export-file-list-btn');
   if (_expBtn) _expBtn.style.display = 'none';
+  const _flBtn = document.getElementById('export-failure-log-btn');
+  if (_flBtn) _flBtn.style.display = 'none';
   const _leg = document.getElementById('hop-legend');
   if (_leg) _leg.classList.remove('visible');
   document.getElementById('hdr-filter').style.display = 'none';
@@ -1296,6 +1447,11 @@ function runDiff() {
 
   document.getElementById('run-btn').disabled = true;
   cache = {}; runResults = null; activeIdx = null;
+  // Hide post-run export buttons until this run completes
+  const _flBtn0 = document.getElementById('export-failure-log-btn');
+  if (_flBtn0) _flBtn0.style.display = 'none';
+  const _expBtn0 = document.getElementById('export-file-list-btn');
+  if (_expBtn0) _expBtn0.style.display = 'none';
 
   // Progress elements
   const progWrap  = document.getElementById('analysis-progress');
@@ -1389,6 +1545,8 @@ function runDiff() {
         // Show export button now that file cache is populated
         const expBtn = document.getElementById('export-file-list-btn');
         if (expBtn) expBtn.style.display = 'inline-block';
+        // Show failure-log button if any API calls failed/retried during the run
+        refreshFailureLogBadge();
         break;
 
       case 'error':
@@ -1502,7 +1660,13 @@ function selectHop(idx) {
 function setSevBadge(idx, sev) {
   const el = document.getElementById('sev-' + idx);
   if (!el) return;
-  const map = {error:['sev-error','!'], warn:['sev-warn','\u25b3'], info:['sev-info','\u25cf'], clean:['sev-clean','\u2713']};
+  const map = {
+    error:   ['sev-error',   '!'],
+    timeout: ['sev-timeout', '\u23f1'],   // ⏱
+    warn:    ['sev-warn',    '\u25b3'],   // △
+    info:    ['sev-info',    '\u25cf'],   // ●
+    clean:   ['sev-clean',   '\u2713'],   // ✓
+  };
   const [cls, lbl] = map[sev] || ['sev-pending', '\u2026'];
   el.className = 'sev ' + cls;
   el.textContent = lbl;
@@ -1524,8 +1688,100 @@ function showDevPanel(hop, data) {
     dp.innerHTML = '<div class="loading-msg" style="color:var(--muted)">Synthetic/carrier object \u2014 no device API endpoints available.</div>';
     return;
   }
+
+  // Timeout banner with retry button — shown above any partial results.
+  let timeoutBanner = '';
+  if (data.timed_out) {
+    const completed = (data.phases_completed || []);
+    const completedTxt = completed.length ? completed.join(', ') : 'nothing';
+    timeoutBanner =
+      `<div class="timeout-banner">` +
+        `<div class="timeout-banner-title">\u23f1 Analysis interrupted</div>` +
+        `<div class="timeout-banner-body">` +
+          `Completed phases: <strong>${esc(completedTxt)}</strong>. ` +
+          `Showing what was collected before the deadline. ` +
+          `<button class="btn btn-retry" onclick="retryDevice('${esc(data.deviceName)}')">\u21bb Retry this device</button>` +
+        `</div>` +
+      `</div>`;
+  }
+
   const errs = (data.errors || []).map(e => `<div style="color:var(--error);font-size:0.67rem;margin-bottom:4px">&#x26a0; ${esc(e)}</div>`).join('');
-  dp.innerHTML = errs + renderMeta(data.metadata) + renderTopo(data.topology) + renderFiles(data.files);
+  // For timed-out devices, only render sections whose phase actually completed
+  // (avoids showing a spurious "no changes" topology when topology never ran).
+  const completed = new Set(data.phases_completed || []);
+  const showAll = !data.timed_out;
+  const metaHtml = (showAll || completed.has('metadata')) ? renderMeta(data.metadata)
+                : `<div class="phase-skipped">Metadata phase did not complete \u2014 retry to re-run.</div>`;
+  const topoHtml = (showAll || completed.has('topology')) ? renderTopo(data.topology)
+                : `<div class="phase-skipped">Topology phase did not complete \u2014 retry to re-run.</div>`;
+  const filesHtml = (showAll || completed.has('files')) ? renderFiles(data.files)
+                : `<div class="phase-skipped">Files phase did not complete \u2014 retry to re-run.</div>`;
+  dp.innerHTML = timeoutBanner + errs + metaHtml + topoHtml + filesHtml;
+}
+
+async function retryDevice(deviceName) {
+  if (!runResults || !runResults.params) return;
+  const hopIdx = runResults.hops.findIndex(h => h.deviceName === deviceName);
+  if (hopIdx < 0) return;
+  // Visual feedback: show pending in the panel + flip the hop badge to pending
+  setSevBadge(hopIdx, 'pending');
+  const dp = document.getElementById('dev-panel');
+  if (dp && dp.style.display !== 'none') {
+    dp.innerHTML = `<div class="loading-msg">Re-running analysis for <strong>${esc(deviceName)}</strong>\u2026</div>`;
+  }
+  try {
+    const r = await fetch('/analyze-device', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        networkId:   runResults.params.networkId,
+        deviceName:  deviceName,
+        snapWorking: runResults.params.snapWorking,
+        snapBroken:  runResults.params.snapBroken,
+        filterName:  document.getElementById('filter-select')
+                       ? document.getElementById('filter-select').value
+                       : 'default',
+      }),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const result = await r.json();
+    cache[deviceName] = result;
+    runResults.analysis[deviceName] = result;
+    setSevBadge(hopIdx, result.severity || 'clean');
+    // Re-render panel only if this device is still the one being viewed
+    const hop = runResults.hops[hopIdx];
+    if (dp && dp.style.display !== 'none') {
+      showDevPanel(hop, result);
+    }
+    // Refresh failure-log button since this retry may have logged more
+    refreshFailureLogBadge();
+  } catch (e) {
+    setSevBadge(hopIdx, 'error');
+    if (dp && dp.style.display !== 'none') {
+      dp.innerHTML = `<div style="color:var(--error)">Retry failed: ${esc(e.message || String(e))}</div>`;
+    }
+  }
+}
+
+async function refreshFailureLogBadge() {
+  const btn = document.getElementById('export-failure-log-btn');
+  if (!btn) return;
+  try {
+    const r = await fetch('/failure-log-count');
+    if (!r.ok) return;
+    const d = await r.json();
+    const total = d.count || 0;
+    if (total > 0) {
+      btn.style.display = 'inline-block';
+      const failed = d.failures || 0;
+      btn.textContent = failed > 0
+        ? `\u26a0 Export failure log (${failed} failed${total > failed ? `, ${total - failed} retried` : ''})`
+        : `\u21ba Export retry log (${total} retried)`;
+      btn.classList.toggle('btn-warn', failed > 0);
+    } else {
+      btn.style.display = 'none';
+    }
+  } catch (e) { /* ignore */ }
 }
 
 // ── Metadata ──────────────────────────────────────────────────────────────────
@@ -1659,6 +1915,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._handle_run_diff_stream(qs)
         elif self.path == '/export-file-list':
             self._handle_export_file_list()
+        elif self.path == '/export-failure-log':
+            self._handle_export_failure_log()
+        elif self.path == '/failure-log-count':
+            with _failure_log_lock:
+                count    = len(_failure_log)
+                failures = sum(1 for e in _failure_log if e.get('outcome') == 'failed')
+            self._json({'count': count, 'failures': failures})
         elif self.path == '/networks-data':
             self._json(NETWORKS_DATA)
         elif self.path == '/config':
@@ -1826,12 +2089,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self._stream_event(d)
 
         try:
-            # Clear file name cache for this run
-            _file_name_cache.clear()
+            # Clear per-run caches (failure log, partial results, file names)
+            _reset_run_state()
 
             # ── Stage 1: path searches ───────────────────────────────────────
             emit({'stage': 'searching', 'msg': 'Running path search on working snapshot…'})
 
+            _set_api_context(device=None, phase="path_search", snapshot=snap_w)
             _, body_w, _, err_w = run_path_search(
                 base_url, net_id, snap_w, src_ip, dst_ip,
                 intent, max_cand, max_paths, ip_proto, dst_port, max_sec
@@ -1841,6 +2105,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return
 
             emit({'stage': 'searching', 'msg': 'Running path search on broken snapshot…'})
+            _set_api_context(device=None, phase="path_search", snapshot=snap_b)
             _, body_b, _, _ = run_path_search(
                 base_url, net_id, snap_b, src_ip, dst_ip,
                 intent, max_cand, max_paths, ip_proto, dst_port, max_sec
@@ -1896,7 +2161,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             # ── Stage 3: topology ────────────────────────────────────────────
             emit({'stage': 'topology', 'msg': 'Fetching topology for both snapshots…'})
+            _set_api_context(device=None, phase="topology", snapshot=snap_w)
             topo_w, _ = get_topology(base_url, net_id, snap_w)
+            _set_api_context(device=None, phase="topology", snapshot=snap_b)
             topo_b, _ = get_topology(base_url, net_id, snap_b)
             _topo_cache[f"{net_id}:{snap_w}"] = topo_w
             _topo_cache[f"{net_id}:{snap_b}"] = topo_b
@@ -1919,54 +2186,119 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=ANALYSIS_POOL_SIZE) as pool:
                 futures = {pool.submit(analyse_one, h): h for h in non_synthetic}
-                try:
-                    for fut in concurrent.futures.as_completed(futures, timeout=DEVICE_TIMEOUT_S):
-                        done_count += 1
+                # Per-future deadline. Set lazily — when a future first appears
+                # as running, we stamp it with start_time + DEVICE_TIMEOUT_S.
+                # This way queued futures (waiting for a worker thread to free
+                # up) don't burn their deadline waiting in line.
+                deadlines = {}             # fut -> deadline timestamp
+                pending   = set(futures.keys())
+
+                def emit_result(fut, name, result):
+                    """Send a 'device' SSE event with the given result."""
+                    nonlocal done_count
+                    done_count += 1
+                    emit({
+                        'stage':      'device',
+                        'done':       done_count,
+                        'total':      total,
+                        'deviceName': name,
+                        'severity':   result.get('severity', 'clean'),
+                        'analysis':   result,
+                    })
+
+                def build_timeout_result(name):
+                    """Pull whatever phases finished from the partial-result
+                    store. Empty dict means nothing completed for this device."""
+                    with _partial_results_lock:
+                        partial = _partial_results.get(name)
+                    if partial:
+                        # Re-tag severity so the UI knows this is a timeout, not
+                        # a clean run. Preserve any phase data we did capture.
+                        partial = dict(partial)
+                        completed = partial.get('phases_completed') or []
+                        partial['severity'] = 'timeout'
+                        partial['timed_out'] = True
+                        msg = (f"Analysis timed out after {DEVICE_TIMEOUT_S}s "
+                               f"(completed: {', '.join(completed) if completed else 'nothing'}). "
+                               f"Click Retry to re-run this device.")
+                        partial.setdefault('errors', [])
+                        partial['errors'] = list(partial['errors']) + [msg]
+                        return partial
+                    # No partial data — never even completed metadata phase
+                    return {
+                        'deviceName':       name,
+                        'synthetic':        False,
+                        'severity':         'timeout',
+                        'timed_out':        True,
+                        'phases_completed': [],
+                        'errors':           [
+                            f'Analysis timed out after {DEVICE_TIMEOUT_S}s — '
+                            'no phase completed before deadline. Click Retry to re-run.'
+                        ],
+                        'metadata': {'rows': [], 'any_changed': False},
+                        'topology': {'rows': [], 'lost_count': 0, 'new_count': 0, 'any_changed': False},
+                        'files':    [],
+                    }
+
+                # Poll futures: collect any that completed since last tick;
+                # for any whose per-future deadline has passed and still aren't
+                # done, emit a timeout event using whatever partial data is
+                # captured. Don't cancel the futures — they may still write
+                # final results during the grace period below.
+                while pending:
+                    just_done = []
+                    just_timed_out = []
+                    now = time.time()
+                    for fut in list(pending):
+                        if fut.done():
+                            just_done.append(fut)
+                            continue
+                        # Stamp deadline the first time we observe this future
+                        # actually running (i.e. a worker has picked it up).
+                        if fut not in deadlines and fut.running():
+                            deadlines[fut] = now + DEVICE_TIMEOUT_S
+                        # Check deadline only if one has been set
+                        if fut in deadlines and now >= deadlines[fut]:
+                            just_timed_out.append(fut)
+                    for fut in just_done:
+                        hop = futures[fut]
                         try:
-                            name, result = fut.result(timeout=DEVICE_TIMEOUT_S)
-                        except concurrent.futures.TimeoutError:
-                            hop  = futures[fut]
-                            name = hop['deviceName']
-                            result = {
-                                'deviceName': name, 'synthetic': False,
-                                'severity': 'error', 'errors': [f'Analysis timed out after {DEVICE_TIMEOUT_S}s'],
-                                'metadata': {}, 'topology': {}, 'files': []
-                            }
+                            name, result = fut.result(timeout=0)
                         except Exception as e:
-                            hop  = futures[fut]
                             name = hop['deviceName']
                             result = {
-                                'deviceName': name, 'synthetic': False,
-                                'severity': 'error', 'errors': [str(e)],
-                                'metadata': {}, 'topology': {}, 'files': []
+                                'deviceName':       name,
+                                'synthetic':        False,
+                                'severity':         'error',
+                                'errors':           [str(e)],
+                                'phases_completed': [],
+                                'metadata': {'rows': [], 'any_changed': False},
+                                'topology': {'rows': [], 'lost_count': 0, 'new_count': 0, 'any_changed': False},
+                                'files':    [],
                             }
-                        emit({
-                            'stage':      'device',
-                            'done':       done_count,
-                            'total':      total,
-                            'deviceName': name,
-                            'severity':   result.get('severity', 'clean'),
-                            'analysis':   result,
-                        })
-                except concurrent.futures.TimeoutError:
-                    # One or more devices never completed — emit error stubs for them
-                    for fut, hop in futures.items():
-                        if not fut.done():
-                            done_count += 1
-                            emit({
-                                'stage':      'device',
-                                'done':       done_count,
-                                'total':      total,
-                                'deviceName': hop['deviceName'],
-                                'severity':   'error',
-                                'analysis':   {
-                                    'deviceName': hop['deviceName'], 'synthetic': False,
-                                    'severity': 'error',
-                                    'errors': [f'Analysis timed out after {DEVICE_TIMEOUT_S}s — API call may be hung'],
-                                    'metadata': {}, 'topology': {}, 'files': []
-                                },
-                            })
-                        fut.cancel()
+                        emit_result(fut, name, result)
+                        pending.discard(fut)
+                    for fut in just_timed_out:
+                        hop  = futures[fut]
+                        name = hop['deviceName']
+                        emit_result(fut, name, build_timeout_result(name))
+                        pending.discard(fut)
+                    if pending:
+                        time.sleep(0.5)
+
+                # Grace period: any future that's still running (because we
+                # didn't cancel the timed-out ones) gets up to GRACE_PERIOD_S
+                # to finish naturally. We do NOT overwrite the already-emitted
+                # timeout event — the user retries via the per-device button.
+                # This block just lets in-flight HTTP work clean up rather
+                # than stranding sockets.
+                grace_deadline = time.time() + GRACE_PERIOD_S
+                still_running = [f for f in futures if not f.done()]
+                while still_running and time.time() < grace_deadline:
+                    time.sleep(0.5)
+                    still_running = [f for f in futures if not f.done()]
+                # Pool's __exit__ will wait for any survivors; daemon threads
+                # mean a stuck thread won't prevent process shutdown anyway.
 
             emit({'stage': 'done'})
 
@@ -1990,6 +2322,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
             topo_w  = _topo_cache.get(f"{net_id}:{snap_w}", [])
             topo_b  = _topo_cache.get(f"{net_id}:{snap_b}", [])
             filters = load_filters()
+
+            # Clear any stale checkpoint for this device so a re-run starts
+            # from a clean slate. analyze_device sets per-phase context
+            # internally, so no need to set it here.
+            with _partial_results_lock:
+                _partial_results.pop(device_name, None)
 
             result = analyze_device(
                 base_url, net_id, device_name,
@@ -2030,6 +2368,88 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain; charset=utf-8')
         self.send_header('Content-Disposition', 'attachment; filename="diff_file_list.txt"')
+        self.send_header('Content-Length', len(body))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _handle_export_failure_log(self):
+        """Return a zip with two files:
+           - failures.json — structured list of every failed/retried API call
+           - replay.sh     — one curl per failure, with $FWD_AUTH placeholder
+
+        Auth headers are NEVER included in the export — replay.sh expects the
+        operator to set FWD_AUTH out-of-band before running.
+        """
+        with _failure_log_lock:
+            entries = list(_failure_log)
+
+        # ── failures.json ─────────────────────────────────────────────────
+        failures_json = json.dumps({
+            "exported_at":  datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "tool":         "path_search_diff",
+            "count":        len(entries),
+            "entries":      entries,
+            "_note":        ("This file logs API calls that ultimately failed OR succeeded "
+                             "only after retry. Auth headers are redacted; use replay.sh to "
+                             "reproduce these calls manually after exporting FWD_AUTH."),
+        }, indent=2).encode("utf-8")
+
+        # ── replay.sh ─────────────────────────────────────────────────────
+        sh_lines = [
+            "#!/usr/bin/env bash",
+            "# Manually replay API calls from the path_search_diff failure log.",
+            "#",
+            "# Setup (one time, in the shell where you run this):",
+            "#   export FWD_AUTH=\"Basic $(printf '%s' \"$FWD_CREDS_<networkId>\" | base64)\"",
+            "# or if you already have a Basic token:",
+            "#   export FWD_AUTH=\"Basic <your-base64-token>\"",
+            "#",
+            "# Each line below uses curl -s with -w to print HTTP status and timing.",
+            "# Pipe to less or jq as needed; add | jq . at the end of any line for parsed output.",
+            "",
+            'if [ -z "${FWD_AUTH:-}" ]; then',
+            '  echo "ERROR: FWD_AUTH env var not set. See header for setup." >&2',
+            '  exit 1',
+            'fi',
+            "",
+        ]
+        for i, e in enumerate(entries, start=1):
+            tag_bits = []
+            if e.get('device'):   tag_bits.append(f"device={e['device']}")
+            if e.get('phase'):    tag_bits.append(f"phase={e['phase']}")
+            if e.get('snapshot'): tag_bits.append(f"snap={e['snapshot'][-8:]}")
+            tag_bits.append(f"outcome={e.get('outcome', '?')}")
+            tag_bits.append(f"class={e.get('error_class', '?')}")
+            tag_bits.append(f"attempts={e.get('attempts', '?')}")
+            tag = " | ".join(tag_bits)
+            sh_lines.append(f"# [{i}] {tag}")
+            if e.get('error'):
+                # Single-line, escape backticks just in case
+                err = e['error'].replace('`', "'").replace('\n', ' ')
+                sh_lines.append(f"#     last error: {err[:300]}")
+            url = e.get('url', '')
+            # Quote the URL for safety
+            sh_lines.append(
+                f'curl -s -w "\\n--- status:%{{http_code}} time:%{{time_total}}s ---\\n" '
+                f'-H "Authorization: $FWD_AUTH" '
+                f'-H "Accept: application/json" '
+                f'"{url}"'
+            )
+            sh_lines.append("")
+        replay_sh = "\n".join(sh_lines).encode("utf-8")
+
+        # ── Build zip in memory ───────────────────────────────────────────
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("failures.json", failures_json)
+            zf.writestr("replay.sh", replay_sh)
+        body = buf.getvalue()
+
+        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/zip')
+        self.send_header('Content-Disposition',
+                         f'attachment; filename="path_search_diff_failures_{ts}.zip"')
         self.send_header('Content-Length', len(body))
         self.end_headers()
         self.wfile.write(body)
