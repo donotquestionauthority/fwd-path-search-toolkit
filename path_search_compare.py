@@ -43,11 +43,30 @@ def _load_discovery():
     return mod
 
 
+# Item 7: hard cap on max_results inside the compare tool. The matrix
+# tester's previous wrapper passed max_results=max_candidates, which
+# meant a maxCandidates=10000 run could stream back 10,000 full Path
+# objects per matrix cell. A 3x3x3 matrix would then load ~270K paths
+# into the browser table — locking it for minutes. We don't actually
+# need 10k full paths to compute firewall fingerprints; 200 is a
+# pragmatic browser-safety cap. It usually captures the useful
+# fingerprint diversity, but a fingerprint that only appears past
+# path 200 in a wide ECMP fan-out wouldn't be detected — the matrix
+# UI flags this case explicitly when the cap fires.
+COMPARE_MAX_RESULTS_CAP = 200
+
+
 def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
                     intent, max_candidates, ip_proto, dst_port, max_seconds=300):
-    """Compare-tool wrapper around the consolidated helper. The matrix tester
-    needs all paths the API found, so max_results is set equal to
-    max_candidates. Returns (status, body_dict_or_error_str, elapsed_ms).
+    """Compare-tool wrapper around the consolidated helper. Returns
+    (status, body_dict_or_error_str, elapsed_ms).
+
+    Item 7: max_results is clamped at COMPARE_MAX_RESULTS_CAP (200) regardless
+    of max_candidates. The full max_candidates is still passed to the API so
+    the search-tree exploration is identical — but the API only streams back
+    the first 200 Path objects, which is enough to compute firewall
+    fingerprints. analyze_paths reads the true hit count from
+    info.totalHits.value.
 
     HTTP 4xx/5xx results are collapsed into the (None, err_msg, ms) shape so
     the existing caller — which only treated `status is None` as failure —
@@ -55,10 +74,20 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
     back as (401, parsed_error_body, ms) and analyze_paths() then got the
     error body and reported "0 paths, NO_FIREWALL" — a misleading clean
     matrix cell on top of an actual auth failure."""
+    # Cap max_results without altering max_candidates — the API's
+    # exploration budget stays the same, only the response size shrinks.
+    capped_max_results = COMPARE_MAX_RESULTS_CAP
+    if max_candidates is not None and max_candidates < capped_max_results:
+        # If the caller asked for fewer candidates than our cap, honour
+        # the caller — no point asking for more results than candidates.
+        capped_max_results = max_candidates
+
     status, body, elapsed_ms, err = _helpers.run_path_search(
         base_url, CREDENTIALS, network_id, snapshot_id, src_ip, dst_ip,
         intent=intent,
-        max_candidates=max_candidates, max_results=max_candidates, max_seconds=max_seconds,
+        max_candidates=max_candidates,
+        max_results=capped_max_results,
+        max_seconds=max_seconds,
         ip_proto=ip_proto, dst_port=dst_port,
     )
     if _helpers.is_path_search_error(status, body, err):
@@ -79,8 +108,24 @@ def analyze_paths(body, consensus_threshold):
         parsed = body or {}
 
     paths      = (parsed.get("info") or {}).get("paths") or []
-    total_hits = (parsed.get("info") or {}).get("totalHits", {})
+    total_hits = (parsed.get("info") or {}).get("totalHits", {}) or {}
     timed_out  = parsed.get("timedOut", False)
+
+    # Item 7: the API tells us the true number of hits via
+    # info.totalHits.value; len(paths) is only the returned slice
+    # (capped at COMPARE_MAX_RESULTS_CAP by our wrapper). Surface
+    # both so the matrix UI can show "200 of 1,847 paths" rather
+    # than misleadingly reporting "200 paths" when there were ten
+    # times that many.
+    #
+    # totalHits.type is "EXACT" when the API enumerated everything
+    # within the search tree, "LOWER_BOUND" when maxCandidates was
+    # reached and the tree was truncated server-side. Both forms can
+    # exceed our local cap on max_results, so the relevant comparison
+    # for "did our cap truncate" is total_hits.value > len(paths).
+    total_hits_value = total_hits.get("value", len(paths))
+    total_hits_type  = total_hits.get("type")
+    truncated_local  = total_hits_value > len(paths)
 
     fw_fingerprints = []
     for p in paths:
@@ -127,6 +172,12 @@ def analyze_paths(body, consensus_threshold):
     return {
         "total_paths":               len(paths),
         "total_hits":                total_hits,
+        # Item 7 additions — UI uses these to display the true hit
+        # count and indicate when the local 200-result cap clipped
+        # the returned paths.
+        "total_hits_value":          total_hits_value,
+        "total_hits_type":           total_hits_type,
+        "truncated_by_local_cap":    truncated_local,
         "timed_out":                 timed_out,
         "paths_with_fw":             paths_with_fw,
         "all_fw_devices":            all_fw_devices,
@@ -583,8 +634,26 @@ function appendRow(r) {
   const a = r.analysis;
   const fwPct  = a.total_paths > 0 ? Math.round(a.paths_with_fw / a.total_paths * 100) : 0;
   const elapsed= r.elapsed_ms < 1000 ? `${r.elapsed_ms}ms` : `${(r.elapsed_ms/1000).toFixed(2)}s`;
-  const pathsCell = (a.total_hits && a.total_hits.type === 'LOWER_BOUND')
-    ? `${a.total_paths}<span style="color:var(--warn)">+</span>` : `${a.total_paths}`;
+
+  // Item 7: display the API's true totalHits.value so users see the
+  // real number of paths, not the (200-capped) returned slice. Two
+  // possible truncation indicators:
+  //   * trailing "+"  — API hit maxCandidates server-side and stopped
+  //                     enumerating (totalHits.type === LOWER_BOUND);
+  //                     true count could be even higher.
+  //   * "(top 200)"   — our local cap clipped the response stream;
+  //                     fingerprint analysis ran on the first 200
+  //                     paths only. A wide ECMP fan-out where a
+  //                     fingerprint only appears past the first 200
+  //                     would not be detected — flag this explicitly
+  //                     so users notice when it matters.
+  const trueCount   = (a.total_hits_value != null) ? a.total_hits_value : a.total_paths;
+  const lowerBound  = (a.total_hits && a.total_hits.type === 'LOWER_BOUND');
+  const localTrunc  = !!a.truncated_by_local_cap;
+  let pathsCell = `${trueCount}`;
+  if (lowerBound) pathsCell += `<span style="color:var(--warn)" title="API hit maxCandidates; true count may be higher">+</span>`;
+  if (localTrunc) pathsCell += ` <span style="color:var(--muted);font-size:0.62rem" title="Showing fingerprint of the first ${a.total_paths} returned paths; matrix capped per-cell to keep the browser responsive">(top ${a.total_paths})</span>`;
+
   const fwTags = (a.all_fw_devices || []).map(n =>
     `<span class="fw-tag">${esc(n)}</span>`).join('') || '<span style="color:var(--muted)">—</span>';
 
@@ -683,20 +752,32 @@ function buildSummary(candidates, ports) {
 
 // ── CSV export ────────────────────────────────────────────────────────────────
 function exportCsv() {
+  // Item 7: total_paths is the analysed slice (max 200 per item 7's
+  // local cap). total_hits_value is the API's true count. Both are
+  // exported so downstream consumers can see whether fingerprint
+  // analysis covered all paths (truncated_by_local_cap=no) or just
+  // the first 200 (truncated_by_local_cap=yes). fw_pct stays based
+  // on total_paths because paths_with_fw was computed against the
+  // same (clamped) set — keeping the ratio internally consistent.
   const hdrs = ['src','dst','maxCandidates','intent','port','elapsed_ms',
-                'total_paths','paths_with_fw','fw_pct','unique_fw_sets',
+                'total_paths_analysed','total_hits_value','truncated_by_local_cap',
+                'paths_with_fw','fw_pct','unique_fw_sets',
                 'consensus','result1_has_fw','result1_matches','all_fw_devices'];
   const rows = [hdrs.join(',')];
   allResults.forEach(r => {
     if (r.error) {
       rows.push([r.combo.src,r.combo.dst,r.combo.maxCandidates,r.combo.intent,
-                 r.combo.portLabel,'','','','','','ERROR','','',csv(r.error)].join(',')); return;
+                 r.combo.portLabel,'','','','','','','','ERROR','','',csv(r.error)].join(',')); return;
     }
     const a = r.analysis;
     rows.push([
       csv(r.combo.src), csv(r.combo.dst),
       r.combo.maxCandidates, r.combo.intent, r.combo.portLabel,
-      r.elapsed_ms, a.total_paths, a.paths_with_fw,
+      r.elapsed_ms,
+      a.total_paths,
+      (a.total_hits_value != null) ? a.total_hits_value : a.total_paths,
+      a.truncated_by_local_cap ? 'yes' : 'no',
+      a.paths_with_fw,
       a.total_paths > 0 ? Math.round(a.paths_with_fw/a.total_paths*100) : 0,
       a.unique_fw_sets, a.consensus,
       a.result1_has_fw ? 'yes' : 'no',

@@ -1057,23 +1057,50 @@ let fwSummaryOpen     = false;
 
 // ── Run query (via Python proxy) ───────────────────────────────────────────────
 async function runQuery() {
+  // Capture the URL and network ID BEFORE the reset clears the URL
+  // display. resetResponseState() wipes url-display along with all
+  // the response panels, so reading these here ensures the new run
+  // uses the URL the user saw in the panel when they clicked Run.
   const url = document.getElementById('url-display').textContent.trim();
   const netIdx = document.getElementById('network-select').value;
   if (netIdx === '') return;
   const networkId = discoveredNetworks[parseInt(netIdx)].id;
 
+  // Item 6 follow-up: reset all response-side UI and JS state before
+  // issuing the new request. Without this, the previous run's filter
+  // pills, autocomplete, firewall summary, navigator state, and
+  // active-set selections leak into the new run for as long as the
+  // request is in flight — and any state the new run doesn't fully
+  // overwrite (e.g. filter pills if the new response has different
+  // outcomes) stays visibly stale even after the response lands.
+  //
+  // Pass {clearUrls:false} so the API URL, App URL, and App search
+  // displays survive — the post-run toolbar copy buttons read from
+  // them, and the URL panel can be reopened during a long-running
+  // request to copy the in-flight URL. clearAll() still calls
+  // resetResponseState() with no opts (i.e. clearUrls=true) for a
+  // full wipe.
+  resetResponseState({ clearUrls: false });
+
   const out       = document.getElementById('json-output');
   const badge     = document.getElementById('resp-status');
   const timeBadge = document.getElementById('resp-time');
+  // copyBtn and dlBtn are still referenced in the success branch
+  // below to re-enable them once a body is available; restoring the
+  // local handles here so the references resolve. Earlier I tried
+  // to consolidate the pre-run reset into resetResponseState() and
+  // accidentally removed these along with the inline reset they were
+  // used for — but the post-fetch enable lines on a successful run
+  // were left behind. ChatGPT's review caught this; without them the
+  // success branch raised ReferenceError and the surrounding try
+  // turned every successful response into "Request failed: copyBtn
+  // is not defined".
   const copyBtn   = document.getElementById('copy-resp-btn');
   const dlBtn     = document.getElementById('dl-raw-btn');
 
+  // resetResponseState set the placeholder; the running message
+  // overrides it for the duration of the request.
   out.innerHTML = '<span class="j-empty">Running...</span>';
-  badge.style.display = 'none';
-  timeBadge.style.display = 'none';
-  copyBtn.disabled = true;
-  dlBtn.disabled   = true;
-  lastRawResponse  = null;
 
   const t0 = performance.now();
 
@@ -1887,17 +1914,35 @@ function copyUrl() {
 // present — only the JSON box was empty. resetResponseState() now
 // owns every UI surface that comes online during a Run, so Clear
 // returns the right pane to its boot-time appearance.
-function resetResponseState() {
-  // URL panel — hide the whole panel and clear the three URL displays
-  // so the toolbar's URL chevron doesn't open onto stale data.
+//
+// Two callers, with different needs:
+//   * clearAll()  — wants a full wipe including URL displays.
+//   * runQuery()  — wants to wipe the *response* side of the panel
+//                   but keep the URL displays so the post-run "copy
+//                   API URL" / "copy App URL" toolbar buttons still
+//                   work, and so the URL panel doesn't briefly flash
+//                   blank if the user reopens it during the run.
+// The opts.clearUrls flag (default true) controls this. Without the
+// flag, clearAll's call has identical behavior to before. With
+// {clearUrls: false}, the URL displays survive the reset.
+function resetResponseState(opts) {
+  opts = opts || {};
+  const clearUrls = opts.clearUrls !== false;
+
+  // URL panel — the panel itself always closes (we don't want the
+  // user staring at the previous run's URL while a new one is in
+  // flight), but the underlying display contents only clear when
+  // the caller asked for a full wipe.
   const urlPanel = document.getElementById('url-panel');
   if (urlPanel) urlPanel.style.display = 'none';
-  const urlDisp = document.getElementById('url-display');
-  if (urlDisp) urlDisp.textContent = '';
-  const appSearch = document.getElementById('app-search-display');
-  if (appSearch) appSearch.textContent = '';
-  const appUrl = document.getElementById('app-url-display');
-  if (appUrl) appUrl.textContent = '';
+  if (clearUrls) {
+    const urlDisp = document.getElementById('url-display');
+    if (urlDisp) urlDisp.textContent = '';
+    const appSearch = document.getElementById('app-search-display');
+    if (appSearch) appSearch.textContent = '';
+    const appUrl = document.getElementById('app-url-display');
+    if (appUrl) appUrl.textContent = '';
+  }
 
   // Response toolbar badges
   const respStatus = document.getElementById('resp-status');
@@ -1965,17 +2010,36 @@ function resetResponseState() {
 
   // JS-side state. These persist across runs and accumulate stale
   // path data + filter selections if not reset.
-  lastRawResponse   = null;
-  allPaths          = [];
-  filteredPaths     = [];
-  currentPathIdx    = 0;
-  activeForwarding  = new Set();
-  activeSecurity    = new Set();
-  activeDeviceTypes = new Set();
-  activeDeviceNames = new Set();
-  activeDisplayNames= new Set();
-  allHopValues      = { deviceType: new Set(), deviceName: new Set(), displayName: new Set() };
-  showEnvelope      = false;
+  lastRawResponse     = null;
+  lastParsedBody      = null;
+  allPaths            = [];
+  filteredPaths       = [];
+  currentPathIdx      = 0;
+  activeForwarding    = new Set();
+  activeSecurity      = new Set();
+  activeDeviceTypes   = new Set();
+  activeDeviceNames   = new Set();
+  activeDisplayNames  = new Set();
+  allHopValues        = { deviceType: new Set(), deviceName: new Set(), displayName: new Set() };
+  showEnvelope        = false;
+  // Rank/filter mode booleans and the FW fingerprint filter were
+  // previously left in their last-Run state across resets, so a
+  // user who left "rank by hops" enabled would see the next Run's
+  // results re-sorted unexpectedly. Same hygiene principle as the
+  // active* sets above.
+  rankByHops          = false;
+  rankBySmart         = false;
+  fwOnly              = false;
+  rankByFwCount       = false;
+  activeFwFingerprint = null;
+  fwSummaryOpen       = false;
+  // urlPanelOpen is the sole source of truth for the URL-toggle
+  // button's chevron direction; if we reset the panel's display
+  // without resetting this flag, the next click would think the
+  // panel is open and try to close an already-closed panel.
+  urlPanelOpen        = false;
+  const viewUrlsBtn = document.getElementById('view-urls-btn');
+  if (viewUrlsBtn) viewUrlsBtn.textContent = '\u25BC URLs';
 }
 
 function clearAll() {
