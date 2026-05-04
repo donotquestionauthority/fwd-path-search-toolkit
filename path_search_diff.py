@@ -1204,6 +1204,20 @@ async function boot() {
 }
 
 // ── Network / snapshot dropdowns ──────────────────────────────────────────────
+// Item 9: format a network's <option> based on its discovery status.
+// See path_search_builder.py for the full status taxonomy and rationale.
+function formatNetworkOption(n) {
+  const status = n.status || 'ok';
+  if (status === 'ok') return { text: (n.name || n.id), disabled: false, title: '' };
+  const labels = {
+    cred_invalid:                   '[auth failed]',
+    cred_other_error:               '[unreachable]',
+    network_not_in_cred_allowlist:  '[not in cred scope]',
+  };
+  const tag = labels[status] || '[error]';
+  return { text: `${n.name || n.id} ${tag}`, disabled: true, title: n.error || status };
+}
+
 function buildNetSel() {
   const sel = document.getElementById('sel-net');
   const cur = sel.value;
@@ -1211,7 +1225,10 @@ function buildNetSel() {
   networksData.forEach(n => {
     const o = document.createElement('option');
     o.value = n.id;
-    o.textContent = n.name || n.id;
+    const fmt = formatNetworkOption(n);
+    o.textContent = fmt.text;
+    if (fmt.disabled) o.disabled = true;
+    if (fmt.title)    o.title    = fmt.title;
     sel.appendChild(o);
   });
   if (cur) sel.value = cur;

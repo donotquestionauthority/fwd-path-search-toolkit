@@ -755,6 +755,34 @@ function togglePanel(id) {
 }
 
 // ── Network dropdown ───────────────────────────────────────────────────────────
+// Item 9: format a network's <option> based on its discovery status.
+// `n.status` is added by fwd_discovery.py and is one of:
+//   ok                            — credential authenticated, network found
+//   cred_invalid                  — bad credential (401/403)
+//   cred_other_error              — transport failure or non-auth HTTP error
+//   network_not_in_cred_allowlist — credential is valid but the user's
+//                                   network ID isn't visible to it
+//
+// Networks with status != ok stay in the dropdown but are disabled, so
+// the user can SEE that the toolkit knows about them and that something's
+// broken — instead of the previous behaviour where they vanished into
+// "no snapshots, must be empty". Tooltip carries the full error message.
+function formatNetworkOption(n) {
+  const status = n.status || 'ok';
+  if (status === 'ok') return { text: n.name, disabled: false, title: '' };
+  const labels = {
+    cred_invalid:                   '[auth failed]',
+    cred_other_error:               '[unreachable]',
+    network_not_in_cred_allowlist:  '[not in cred scope]',
+  };
+  const tag = labels[status] || '[error]';
+  return {
+    text:     `${n.name} ${tag}`,
+    disabled: true,
+    title:    n.error || status,
+  };
+}
+
 function renderNetworkDropdown() {
   const sel = document.getElementById('network-select');
   const current = sel.value;
@@ -762,7 +790,10 @@ function renderNetworkDropdown() {
   discoveredNetworks.forEach((n, i) => {
     const opt = document.createElement('option');
     opt.value = i;
-    opt.textContent = n.name;
+    const fmt = formatNetworkOption(n);
+    opt.textContent = fmt.text;
+    if (fmt.disabled) opt.disabled = true;
+    if (fmt.title)    opt.title    = fmt.title;
     sel.appendChild(opt);
   });
   if (current !== '') sel.value = current;

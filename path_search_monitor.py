@@ -967,13 +967,30 @@ async function boot() {
   }, 300);
 }
 
+// Item 9: format a network's <option> based on its discovery status.
+// See path_search_builder.py for the full status taxonomy and rationale.
+function formatNetworkOption(n) {
+  const status = n.status || 'ok';
+  if (status === 'ok') return { text: n.name, disabled: false, title: '' };
+  const labels = {
+    cred_invalid:                   '[auth failed]',
+    cred_other_error:               '[unreachable]',
+    network_not_in_cred_allowlist:  '[not in cred scope]',
+  };
+  const tag = labels[status] || '[error]';
+  return { text: `${n.name} ${tag}`, disabled: true, title: n.error || status };
+}
+
 function renderNetworkDropdown() {
   const sel = document.getElementById('f-network');
   sel.innerHTML = '<option value="">— select network —</option>';
   discoveredNetworks.forEach((n, i) => {
-    const opt       = document.createElement('option');
-    opt.value       = i;
-    opt.textContent = n.name;
+    const opt = document.createElement('option');
+    opt.value = i;
+    const fmt = formatNetworkOption(n);
+    opt.textContent = fmt.text;
+    if (fmt.disabled) opt.disabled = true;
+    if (fmt.title)    opt.title    = fmt.title;
     sel.appendChild(opt);
   });
 }

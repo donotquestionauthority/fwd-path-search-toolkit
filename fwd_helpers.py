@@ -198,8 +198,30 @@ def collect_credentials(credentials_dict, args, discovery_fn):
         print()
         return base_url, networks_data
     except Exception as e:
-        print(f"  ⚠  Discovery failed: {e}\n")
-        fallback = [{"id": nid, "name": nid, "snapshots": []} for nid in credentials_dict]
+        # Catastrophic failure — discover_all raised before classifying
+        # any individual network. Only happens for things outside any
+        # single network's scope (bad base_url, network module crash,
+        # etc.). Per-network credential failures now flow through
+        # discover_all's normal return path with status fields and do
+        # NOT hit this except.
+        #
+        # Item 3.6 fold-in: previously this fallback produced stub
+        # entries with no status info, indistinguishable in the UI
+        # from healthy networks with no processed snapshots. The
+        # stub now carries status="cred_other_error" so each tool's
+        # network dropdown badges it as broken instead of pretending
+        # everything is fine.
+        print(f"  ⚠  Discovery failed catastrophically: {e}\n")
+        fallback = [
+            {
+                "id":        nid,
+                "name":      nid,
+                "snapshots": [],
+                "status":    "cred_other_error",
+                "error":     f"Discovery aborted: {e}",
+            }
+            for nid in credentials_dict
+        ]
         return base_url, fallback
 
 
