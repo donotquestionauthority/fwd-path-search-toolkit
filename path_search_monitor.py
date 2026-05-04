@@ -813,7 +813,14 @@ HTML = r"""<!DOCTYPE html>
   <div class="left-pane">
     <div class="action-bar">
       <button class="btn btn-primary" onclick="showAddForm()">+ Add Entry</button>
-      <button class="btn" id="run-all-btn" onclick="runAll()">▶ Run All</button>
+      <button class="btn" id="run-all-btn"  onclick="runAll()">▶ Run All</button>
+      <!-- Item 8: Stop button. Hidden until Run All starts. Sets a JS
+           flag the runAll() loop checks between entries — whatever's
+           in flight when Stop is clicked completes (the underlying
+           fetch can't be cancelled mid-API call without an
+           AbortController, which is more invasive than this patch
+           needs to be). Subsequent entries are skipped. -->
+      <button class="btn" id="stop-all-btn" onclick="stopAll()" style="display:none">■ Stop</button>
     </div>
     <div class="entry-list" id="entry-list">
       <div class="empty-state"><span class="big">↑</span>No entries yet</div>
@@ -1274,34 +1281,121 @@ async function runOne(id) {
   finally { prog.style.display = 'none'; bar.style.width = '0%'; }
 }
 
+// ── Run all (item 8) ──────────────────────────────────────────────────────────
+// Replaces the previous synchronous /api/run-all call, which blocked the
+// browser for up to several minutes on a moderately-sized watchlist while
+// the server processed every entry sequentially with no progress feedback.
+//
+// New approach: client loops over active entries, calls /api/run-one for
+// each, and updates the shared progress bar/label after every response.
+// Same sequential semantics on the backend (no new endpoint, no parallel
+// API calls), but the user sees per-entry progress instead of a frozen
+// "Running…" state. /api/run-all stays in place for any scripted callers
+// or future restoration of the synchronous mode.
+//
+// Per-entry errors no longer abort the whole run — the loop continues to
+// the next entry and the failed entry's row reflects the error in
+// renderEntryList(). Previously a single failure caused alert() and
+// terminated, which on a long run was strictly worse than soldiering on.
+let runAllAbort = false;
+
 async function runAll() {
   const active = entries.filter(e => e.status === 'active');
   if (!active.length) { alert('No active entries to run.'); return; }
 
-  const btn   = document.getElementById('run-all-btn');
-  const prog  = document.getElementById('run-progress');
-  const label = document.getElementById('prog-label');
-  const bar   = document.getElementById('prog-bar');
-  btn.disabled = true;
+  const runBtn  = document.getElementById('run-all-btn');
+  const stopBtn = document.getElementById('stop-all-btn');
+  const prog    = document.getElementById('run-progress');
+  const label   = document.getElementById('prog-label');
+  const bar     = document.getElementById('prog-bar');
+
+  runAllAbort   = false;
+  runBtn.disabled    = true;
+  runBtn.textContent = '▶ Running…';
+  stopBtn.style.display = 'inline-block';
+  stopBtn.disabled      = false;
   prog.style.display = 'flex';
 
+  let done = 0, errors = 0;
   try {
-    label.textContent = `Running ${active.length} check(s)…`;
-    bar.style.width = '10%';
-    const resp = await fetch('/api/run-all', {method: 'POST', headers: {'Content-Type':'application/json'}, body: '{}'});
-    const data = await resp.json();
-    bar.style.width = '100%';
-    data.updated.forEach(u => {
-      const idx = entries.findIndex(e => e.id === u.id);
-      if (idx >= 0) entries[idx] = u;
-    });
-    renderEntryList();
-    if (activeId) {
-      const updated = entries.find(e => e.id === activeId);
-      if (updated) renderDetail(updated);
+    for (const entry of active) {
+      if (runAllAbort) break;
+
+      const idx = active.indexOf(entry) + 1;
+      label.textContent = `(${idx}/${active.length}) ${entryLabel(entry)}…`;
+      bar.style.width = Math.round((done / active.length) * 100) + '%';
+
+      try {
+        const resp = await fetch('/api/run-one', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({id: entry.id}),
+        });
+        const updated = await resp.json();
+
+        // /api/run-one returns the updated entry on success or
+        // {error: "..."} on lookup failure. The lookup-failure case
+        // shouldn't occur during runAll (we built `active` from the
+        // current entries list moments ago) but guard against it
+        // anyway so a stale entries list doesn't poison the loop.
+        if (updated && updated.id) {
+          const eIdx = entries.findIndex(e => e.id === entry.id);
+          if (eIdx >= 0) entries[eIdx] = updated;
+          if (updated.lastResult === 'error') errors++;
+        } else {
+          errors++;
+        }
+      } catch (e) {
+        // Network error or JSON parse error — log to console for
+        // debugging but keep the run going. The entry's row will not
+        // have been updated, so its lastRun timestamp stays at the
+        // previous value, which is the correct UI signal that this
+        // entry didn't actually run.
+        console.error(`Run failed for entry ${entry.id}:`, e);
+        errors++;
+      }
+
+      done++;
+      // Re-render after every entry so the user sees results land
+      // incrementally rather than all at once at the end.
+      renderEntryList();
+      if (activeId) {
+        const updatedActive = entries.find(e => e.id === activeId);
+        if (updatedActive) renderDetail(updatedActive);
+      }
     }
-  } catch(e) { alert('Run all failed: ' + e.message); }
-  finally { btn.disabled = false; prog.style.display = 'none'; bar.style.width = '0%'; }
+
+    bar.style.width = '100%';
+    if (runAllAbort) {
+      label.textContent = `Stopped. ${done}/${active.length} completed${errors ? `, ${errors} error(s)` : ''}.`;
+    } else if (errors) {
+      label.textContent = `Done. ${done}/${active.length} completed, ${errors} error(s).`;
+    } else {
+      label.textContent = `Done. ${done}/${active.length} completed.`;
+    }
+  } finally {
+    runBtn.disabled    = false;
+    runBtn.textContent = '▶ Run All';
+    stopBtn.style.display = 'none';
+    // Hide the progress bar after a short delay so the user has time
+    // to read the final status message.
+    setTimeout(() => { prog.style.display = 'none'; bar.style.width = '0%'; }, 2500);
+  }
+}
+
+function stopAll() {
+  // Set the abort flag and immediately reflect "stopping" in the UI.
+  // The loop in runAll() checks this flag at the top of every
+  // iteration. The currently-in-flight /api/run-one will complete
+  // (the API can take up to maxSeconds; that's why this isn't truly
+  // instant). Skipping AbortController here is a deliberate scope
+  // choice — adding it ties into broader request-cancellation work
+  // that's better done as its own item.
+  runAllAbort = true;
+  const stopBtn = document.getElementById('stop-all-btn');
+  stopBtn.disabled = true;
+  const label = document.getElementById('prog-label');
+  if (label) label.textContent = label.textContent + ' (stopping after current entry…)';
 }
 
 // ── Archive ───────────────────────────────────────────────────────────────────
