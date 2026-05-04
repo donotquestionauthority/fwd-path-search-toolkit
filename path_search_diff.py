@@ -1580,11 +1580,19 @@ function updateSnapLabels(data) {
   const wl = data.snap_working_label || data.params.snapWorking;
   const bl = data.snap_broken_label  || data.params.snapBroken;
   const wc = data.working_path_count != null ? data.working_path_count : '?';
-  const bc = data.broken_path_count  != null ? data.broken_path_count  : '?';
+  // If the broken-snapshot path search hit an API error, the helper now
+  // forwards the message in data.broken_error so we can show "error: HTTP
+  // 409 …" beside the broken label rather than just "0 path(s)" — which
+  // was indistinguishable from a legitimate empty result. The "error:"
+  // prefix is deliberate: it makes clear this slot is not a path count.
+  const brokenErr = data.broken_error || '';
+  const bc = brokenErr
+    ? `<span class="snap-broken">error: ${esc(brokenErr)}</span>`
+    : `${data.broken_path_count != null ? data.broken_path_count : '?'} path(s)`;
   const p  = data.params || {};
   document.getElementById('snap-labels').innerHTML =
     `<div><span class="snap-working">&#x25cf; working</span> <span class="snap-label">${esc(wl)} &middot; ${wc} path(s)</span></div>` +
-    `<div style="margin-top:2px"><span class="snap-broken">&#x25cf; broken</span> <span class="snap-label">${esc(bl)} &middot; ${bc} path(s)</span></div>`;
+    `<div style="margin-top:2px"><span class="snap-broken">&#x25cf; broken</span> <span class="snap-label">${esc(bl)} &middot; ${bc}</span></div>`;
   const searchStr = buildSearchStr(p);
   const hdrStr = document.getElementById('hdr-search-str');
   if (hdrStr) {
@@ -1952,20 +1960,37 @@ class Handler(http.server.BaseHTTPRequestHandler):
             max_paths= int(req.get('maxPaths', 10))
             max_sec  = int(req.get('maxSeconds', 30))
 
-            # Path search — working snapshot
-            _, body_w, _, err_w = run_path_search(
+            # Path search — working snapshot. Gate on is_path_search_error
+            # rather than `err and body is None` — on HTTP 4xx/5xx the helper
+            # returns both an err string AND the parsed error body, and the
+            # old guard skipped through, surfacing API errors as the
+            # misleading "No paths returned. Check search parameters."
+            status_w, body_w, _, err_w = run_path_search(
                 base_url, net_id, snap_w, src_ip, dst_ip,
                 intent, max_cand, max_paths, ip_proto, dst_port, max_sec
             )
-            if err_w and body_w is None:
-                self._json({'error': f'Path search failed on working snapshot: {err_w}'})
+            if _helpers.is_path_search_error(status_w, body_w, err_w):
+                msg = _helpers.extract_path_search_error_message(status_w, body_w, err_w)
+                self._json({'error': f'Path search failed on working snapshot: {msg}'})
                 return
 
-            # Path search — broken snapshot (failure here is OK — may return nothing)
-            _, body_b, _, _ = run_path_search(
+            # Path search — broken snapshot. Failure here is acceptable
+            # (the broken snapshot may legitimately return zero paths) but
+            # we still want to surface auth/server errors honestly rather
+            # than silently treating a 401 as "broken snapshot has no paths."
+            status_b, body_b, _, err_b = run_path_search(
                 base_url, net_id, snap_b, src_ip, dst_ip,
                 intent, max_cand, max_paths, ip_proto, dst_port, max_sec
             )
+            if _helpers.is_path_search_error(status_b, body_b, err_b):
+                # Distinguish "API rejected the call" (we want to know) from
+                # "API succeeded with zero paths" (expected for a regression).
+                # An HTTP error or transport failure means body_b cannot be
+                # trusted at all — treat it as missing.
+                broken_error = _helpers.extract_path_search_error_message(status_b, body_b, err_b)
+                body_b       = None
+            else:
+                broken_error = None
 
             # Build device investigation set from working path
             ordered_hops, all_device_names = build_device_set(body_w or {}, max_paths)
@@ -2010,6 +2035,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'snap_broken_label':   snap_label(snap_b),
                 'working_path_count':  hit_count(body_w),
                 'broken_path_count':   hit_count(body_b),
+                # Surface broken-snapshot API errors so the UI can show
+                # "broken snapshot returned HTTP 409" rather than silently
+                # treating it as "broken snapshot has no paths."
+                'broken_error':        broken_error,
                 'params': {
                     'networkId':   net_id,
                     'snapWorking': snap_w,
@@ -2079,20 +2108,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
             emit({'stage': 'searching', 'msg': 'Running path search on working snapshot…'})
 
             _set_api_context(device=None, phase="path_search", snapshot=snap_w)
-            _, body_w, _, err_w = run_path_search(
+            status_w, body_w, _, err_w = run_path_search(
                 base_url, net_id, snap_w, src_ip, dst_ip,
                 intent, max_cand, max_paths, ip_proto, dst_port, max_sec
             )
-            if err_w and body_w is None:
-                emit({'stage': 'error', 'msg': f'Path search failed on working snapshot: {err_w}'})
+            if _helpers.is_path_search_error(status_w, body_w, err_w):
+                msg = _helpers.extract_path_search_error_message(status_w, body_w, err_w)
+                emit({'stage': 'error', 'msg': f'Path search failed on working snapshot: {msg}'})
                 return
 
             emit({'stage': 'searching', 'msg': 'Running path search on broken snapshot…'})
             _set_api_context(device=None, phase="path_search", snapshot=snap_b)
-            _, body_b, _, _ = run_path_search(
+            status_b, body_b, _, err_b = run_path_search(
                 base_url, net_id, snap_b, src_ip, dst_ip,
                 intent, max_cand, max_paths, ip_proto, dst_port, max_sec
             )
+            # An error on the broken snapshot doesn't abort the run — a
+            # legitimately broken path may return zero results — but we
+            # surface the API error string in the final payload instead
+            # of letting it look like "no paths."
+            if _helpers.is_path_search_error(status_b, body_b, err_b):
+                broken_error = _helpers.extract_path_search_error_message(status_b, body_b, err_b)
+                body_b       = None
+            else:
+                broken_error = None
 
             ordered_hops, all_device_names = build_device_set(body_w or {}, max_paths)
             if not ordered_hops:
@@ -2130,6 +2169,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 'snap_broken_label':   snap_label(snap_b),
                 'working_path_count':  hit_count(body_w),
                 'broken_path_count':   hit_count(body_b),
+                # Surface broken-snapshot API errors so the UI can show
+                # "broken snapshot returned HTTP 409" rather than silently
+                # treating it as "broken snapshot has no paths."
+                'broken_error':        broken_error,
                 'params': {
                     'networkId':   net_id,
                     'snapWorking': snap_w,

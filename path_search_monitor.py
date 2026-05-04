@@ -97,7 +97,11 @@ def analyze_path_result(body):
     if not body:
         return {"total_paths": 0, "hop_device_set": [], "fw_fingerprint": [], "timed_out": False}
 
-    paths     = body.get("paths") or []
+    # paths live under info.paths per the Path Search API response schema —
+    # NOT at the top level of the body. Reading body["paths"] silently returns
+    # an empty list and every classification ends up comparing empty hop and
+    # firewall sets to the baseline, so almost everything looks like NO_CHANGE.
+    paths     = (body.get("info") or {}).get("paths") or []
     timed_out = bool(body.get("timedOut"))
 
     hop_device_set = []
@@ -327,17 +331,25 @@ def run_entry_check(entry):
 
     results = []
 
-    # Run baseline first to get the reference result
+    # Run baseline first to get the reference result.
+    # Gate on is_path_search_error rather than `err or not body` — on HTTP
+    # 4xx/5xx the helper returns BOTH a populated body (the parsed error
+    # response) and an err string, and the old guard saw `err` truthy and
+    # exited correctly here, but the SAME pattern in the per-snapshot loop
+    # below would have skipped the error guard once the helper returned
+    # body alongside err. Using is_path_search_error keeps the two call
+    # sites consistent.
     status, body, elapsed, err = run_path_search(
         network_id, baseline_id, src_ip, dst_ip,
         intent=intent, ip_proto=ip_proto, dst_port=dst_port,
         max_candidates=max_candidates, max_results=max_results, max_seconds=max_seconds
     )
-    if err or not body:
+    if _helpers.is_path_search_error(status, body, err):
+        msg = _helpers.extract_path_search_error_message(status, body, err)
         return {**entry,
                 "lastRun": _now_iso(),
                 "lastResult": "error",
-                "lastError": err or "No response from baseline snapshot",
+                "lastError": msg,
                 "runResults": []}
 
     baseline_analysis = analyze_path_result(body)
@@ -362,7 +374,8 @@ def run_entry_check(entry):
             intent=intent, ip_proto=ip_proto, dst_port=dst_port,
             max_candidates=max_candidates, max_results=max_results, max_seconds=max_seconds
         )
-        if er or not b:
+        if _helpers.is_path_search_error(s, b, er):
+            err_msg = _helpers.extract_path_search_error_message(s, b, er)
             results.append({
                 "snapshotId":    snap_id,
                 "snapshotLabel": _snap_label(network_id, snap_id),
@@ -371,7 +384,7 @@ def run_entry_check(entry):
                 "elapsed_ms":    el,
                 "analysis":      None,
                 "classification": "ERROR",
-                "detail":        {"error": er or "No response"},
+                "detail":        {"error": err_msg},
                 "body":          None,
             })
             continue

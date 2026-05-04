@@ -1672,9 +1672,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 # Transient retry happens inside the helper; if err is set
                 # here, the retry already exhausted.
 
-                if err and body is None:
+                # Gate on is_path_search_error rather than `err and body is
+                # None` — on HTTP 4xx/5xx the helper returns BOTH an err
+                # string and the parsed error body, and the old guard
+                # skipped through, then analyze_snapshot_result read
+                # info.paths off the error body and surfaced "0 paths" as
+                # a row that looked like a legitimate clean snapshot.
+                if _helpers.is_path_search_error(status, body, err):
+                    msg = _helpers.extract_path_search_error_message(status, body, err)
                     result = {
-                        'error': err, 'elapsed_ms': elapsed_ms, 'analysis': None,
+                        'error': msg, 'elapsed_ms': elapsed_ms, 'analysis': None,
                         'api_url': api_url, 'app_search': app_search, 'app_url': app_url,
                         'raw_body': None
                     }
@@ -1684,7 +1691,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         'status':     status,
                         'elapsed_ms': elapsed_ms,
                         'analysis':   analysis,
-                        'error':      err if status and status >= 400 else None,
+                        'error':      None,
                         'api_url':    api_url,
                         'app_search': app_search,
                         'app_url':    app_url,

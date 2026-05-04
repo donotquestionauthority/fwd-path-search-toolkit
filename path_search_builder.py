@@ -1923,9 +1923,20 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
                 # Extract maxSeconds from the URL query string so the socket
                 # timeout respects whatever the user configured in the UI.
-                _qs         = urllib.parse.urlparse(url).query
-                _params     = dict(p.split('=') for p in _qs.split('&') if '=' in p)
-                _max_sec    = int(_params.get('maxSeconds', 30))
+                # parse_qs is required (not a dict comprehension on '=') because
+                # query VALUES can legitimately contain '=' — encoded subnets,
+                # app search strings, etc. — and naive splitting raises
+                # ValueError before the request can even be issued.
+                # The int() conversion is wrapped in try/except so a junk
+                # maxSeconds value (typo, malformed saved search, future
+                # API change) falls back to 30 rather than crashing the
+                # proxy and stranding the user on a generic ERROR badge.
+                _qs     = urllib.parse.urlparse(url).query
+                _params = urllib.parse.parse_qs(_qs)
+                try:
+                    _max_sec = int((_params.get('maxSeconds') or ['30'])[0])
+                except (ValueError, TypeError):
+                    _max_sec = 30
                 _sock_timeout = _max_sec + _helpers.API_TIMEOUT_S
 
                 req = urllib.request.Request(url)

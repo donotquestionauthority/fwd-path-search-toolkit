@@ -47,17 +47,23 @@ def run_path_search(base_url, network_id, snapshot_id, src_ip, dst_ip,
                     intent, max_candidates, ip_proto, dst_port, max_seconds=300):
     """Compare-tool wrapper around the consolidated helper. The matrix tester
     needs all paths the API found, so max_results is set equal to
-    max_candidates. Returns (status, body_dict_or_error_str, elapsed_ms)."""
+    max_candidates. Returns (status, body_dict_or_error_str, elapsed_ms).
+
+    HTTP 4xx/5xx results are collapsed into the (None, err_msg, ms) shape so
+    the existing caller — which only treated `status is None` as failure —
+    surfaces real API errors honestly. Without this collapse, a 401 came
+    back as (401, parsed_error_body, ms) and analyze_paths() then got the
+    error body and reported "0 paths, NO_FIREWALL" — a misleading clean
+    matrix cell on top of an actual auth failure."""
     status, body, elapsed_ms, err = _helpers.run_path_search(
         base_url, CREDENTIALS, network_id, snapshot_id, src_ip, dst_ip,
         intent=intent,
         max_candidates=max_candidates, max_results=max_candidates, max_seconds=max_seconds,
         ip_proto=ip_proto, dst_port=dst_port,
     )
-    if status is None:
-        # Surface the error string in slot 2 so the existing caller's
-        # `if status is None: result = {'error': body, ...}` keeps working.
-        return None, err or "Path search failed", elapsed_ms
+    if _helpers.is_path_search_error(status, body, err):
+        msg = _helpers.extract_path_search_error_message(status, body, err)
+        return None, msg, elapsed_ms
     return status, body, elapsed_ms
 
 

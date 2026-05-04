@@ -240,7 +240,27 @@ def get_snapshot_label(networks_data, network_id, snapshot_id):
 def build_path_search_url(base_url, network_id, snapshot_id, src_ip, dst_ip,
                           intent="PREFER_DELIVERED",
                           max_candidates=5000, max_results=1, max_seconds=30,
-                          ip_proto=None, dst_port=None):
+                          ip_proto=None, dst_port=None,
+                          # Practical pass-through params added in Phase 1
+                          # item 4. All default None — when None they are
+                          # omitted from the query string so the server's
+                          # default (per the OpenAPI spec) applies. Numeric
+                          # values are validated by item 5; non-numeric
+                          # values (from_device, app_id, url_param, domain)
+                          # are passed through as-is and the Forward
+                          # Networks API surfaces its own 400 on bad input.
+                          # Deferred: TCP flag bits (fin/syn/rst/psh/ack/urg)
+                          # and userGroupId. Add when a real user need
+                          # appears — keeping the surface tight here.
+                          from_device=None,
+                          src_port=None,
+                          icmp_type=None,
+                          app_id=None,
+                          url_param=None,
+                          domain=None,
+                          include_tags=None,
+                          include_network_functions=None,
+                          max_return_path_results=None):
     """Construct the full Path Search API URL (with query string) without
     issuing the request. Used by tools that need to display or copy the URL
     in addition to executing the search.
@@ -248,25 +268,279 @@ def build_path_search_url(base_url, network_id, snapshot_id, src_ip, dst_ip,
     intent may be None or empty to omit it from the URL — the API will use
     its server-side default in that case.
     max_candidates may be None to omit it (server-side default applies).
+
+    The Phase 1 item 4 pass-through params (from_device, src_port, icmp_type,
+    app_id, url_param, domain, include_tags, include_network_functions,
+    max_return_path_results) all default None and are omitted when None.
+    Naming notes:
+      - `from_device` maps to the `from` query param (Python keyword).
+      - `url_param`   maps to the `url`  query param (avoids shadowing the
+        urllib.request.url attribute used elsewhere in the helper).
+      - Boolean params (include_tags, include_network_functions) are
+        serialised as lowercase 'true'/'false' to match the API's
+        documented format. Callers may pass either Python bools or the
+        strings 'true'/'false' — both work.
+
+    Phase 1 item 5 validation: numeric range checks for maxCandidates,
+    maxResults, maxSeconds, ipProto, icmpType, maxReturnPathResults, and
+    port values are performed BEFORE the URL is assembled. Out-of-range
+    values raise ValueError with a clear, actionable message ("maxSeconds
+    must be 1-300, got 500") rather than letting the API return an
+    opaque HTTP 400. Strings are coerced to ints where appropriate so
+    values arriving from the wire (form posts, JSON requests) work
+    without callers needing to pre-cast. Port values may be bare ints
+    or "N-M" range strings per the API spec — both forms are validated.
     """
+    # ── Phase 1 item 5 validation ─────────────────────────────────────────
+    # Validate before any URL assembly so we fail loudly on the local
+    # side instead of letting the API reject with HTTP 400.
+    max_candidates = _coerce_int_in_range(
+        max_candidates, "maxCandidates", 1, 10000)
+    max_results    = _coerce_int_in_range(
+        max_results,    "maxResults",    1, 10000)
+    max_seconds    = _coerce_int_in_range(
+        max_seconds,    "maxSeconds",    1, 300)
+    ip_proto       = _coerce_int_in_range(
+        ip_proto,       "ipProto",       0, 255)
+    icmp_type      = _coerce_int_in_range(
+        icmp_type,      "icmpType",      0, 255)
+    max_return_path_results = _coerce_int_in_range(
+        max_return_path_results, "maxReturnPathResults", 0, 10000)
+
+    # Cross-field check: maxResults must not exceed maxCandidates per
+    # the API spec. When max_candidates is None the URL omits it and
+    # the API applies its server-side default of 5000 — so the check
+    # has to use that effective value, not skip the comparison
+    # entirely. Without this, a caller could pass max_results=10000
+    # and max_candidates=None, pass local validation, and still get a
+    # 400 from the API because it evaluates against default 5000.
+    # Item 5's stated goal is to fail loudly before the API does, so
+    # the effective-default substitution is required for completeness.
+    SERVER_DEFAULT_MAX_CANDIDATES = 5000
+    effective_max_candidates = (
+        max_candidates if max_candidates is not None
+        else SERVER_DEFAULT_MAX_CANDIDATES
+    )
+    if max_results is not None and max_results > effective_max_candidates:
+        explicit = max_candidates is not None
+        raise ValueError(
+            f"maxResults ({max_results}) must be <= maxCandidates "
+            f"({effective_max_candidates}"
+            f"{'' if explicit else ', server default'})"
+        )
+
+    # Ports: int 0-65535 OR "N-M" range string with both sides in range.
+    dst_port = _validate_port_value(dst_port, "dstPort")
+    src_port = _validate_port_value(src_port, "srcPort")
+
+    # Cross-field check: url and domain are mutually exclusive per the
+    # API spec — both target the L7 layer but represent different match
+    # modes. Surfacing this here gives a clearer error than the 400 the
+    # API returns ("Invalid combination of L7 parameters").
+    if url_param and domain:
+        raise ValueError(
+            "url and domain cannot be specified together — they are "
+            "mutually exclusive L7 match modes"
+        )
+
     params = {
-        "srcIp":      src_ip,
         "dstIp":      dst_ip,
         "maxResults": str(max_results),
         "maxSeconds": str(max_seconds),
     }
+    # srcIp is conditional, not unconditional. The API supports a
+    # from=<device> + dstIp=<addr> shape that has no srcIp at all
+    # (when the caller is searching from a device's perspective rather
+    # than from an IP). Unconditionally inserting srcIp into the params
+    # dict produced literal `srcIp=None` in the URL when src_ip was
+    # None — invalid input on the wire that the API would reject with
+    # an unhelpful 400. Empty string is also treated as "not supplied"
+    # since form posts often send '' rather than None.
+    if src_ip is not None and src_ip != "":
+        params["srcIp"] = src_ip
     if intent:
         params["intent"] = intent
     if max_candidates:
         params["maxCandidates"] = str(max_candidates)
     if snapshot_id:
         params["snapshotId"] = snapshot_id
-    if ip_proto:
+    # Use `is not None` rather than truthiness so legal-but-falsy values
+    # (ipProto=0, the IPv6 Hop-by-Hop number) round-trip. Item 5
+    # validation has already converted these to int-or-None, so a None
+    # check is sufficient. dst_port/src_port have been coerced to a
+    # string-or-None by _validate_port_value.
+    if ip_proto is not None:
         params["ipProto"] = str(ip_proto)
-    if dst_port:
-        params["dstPort"] = str(dst_port)
+    if dst_port is not None:
+        params["dstPort"] = dst_port
+
+    # ── Phase 1 item 4 pass-through params ────────────────────────────────
+    if from_device:
+        params["from"] = from_device
+    if src_port is not None:
+        params["srcPort"] = src_port
+    if icmp_type is not None and icmp_type != "":
+        # icmp_type=0 is a legal value (echo reply), so check explicitly
+        # for None/empty rather than truthiness.
+        params["icmpType"] = str(icmp_type)
+    if app_id:
+        params["appId"] = app_id
+    if url_param:
+        params["url"] = url_param
+    if domain:
+        params["domain"] = domain
+    if include_tags is not None and include_tags != "":
+        params["includeTags"] = _bool_param(include_tags)
+    if include_network_functions is not None and include_network_functions != "":
+        params["includeNetworkFunctions"] = _bool_param(include_network_functions)
+    if max_return_path_results is not None and max_return_path_results != "":
+        # Server allows 0 (the default). Omit only when the caller didn't
+        # pass anything — passing 0 explicitly should round-trip.
+        params["maxReturnPathResults"] = str(max_return_path_results)
+
     qs = urllib.parse.urlencode(params)
     return f"{base_url.rstrip('/')}/api/networks/{network_id}/paths?{qs}"
+
+
+def _bool_param(value):
+    """Normalise a boolean-ish value to the 'true'/'false' form the
+    Forward Networks API expects on the wire. Accepts Python bools, the
+    strings 'true'/'false' (any case), '1'/'0', and 'yes'/'no'.
+    Anything else is returned unchanged so the API can surface its own
+    400 if the value is genuinely unsupported."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    s = str(value).strip().lower()
+    if s in ("true", "1", "yes"):
+        return "true"
+    if s in ("false", "0", "no"):
+        return "false"
+    return str(value)
+
+
+def _coerce_int_in_range(value, name, lo, hi):
+    """Validate and coerce value to int in [lo, hi]. None and "" are
+    treated as "not supplied" and pass through as None so existing
+    None-defaulting call sites keep working. Strings are coerced via
+    int() so values arriving from JSON form posts work without manual
+    casting. Booleans are rejected explicitly because Python's int(True)
+    silently returns 1 and would mask a caller passing the wrong type
+    (e.g. include_tags=True into a numeric slot)."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{name} must be an integer in [{lo}, {hi}], got bool {value!r}"
+        )
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name} must be an integer in [{lo}, {hi}], got {value!r}"
+        )
+    if not (lo <= n <= hi):
+        raise ValueError(
+            f"{name} must be in [{lo}, {hi}], got {n}"
+        )
+    return n
+
+
+def _validate_port_value(value, name):
+    """Validate a port value per the API spec: either a single port
+    0-65535 or an inclusive range "N-M" with both sides in range and
+    N <= M. Returns the value as a string ready for the query string,
+    or None if not supplied. Raises ValueError on any malformed input.
+    Booleans are rejected for the same reason as in _coerce_int_in_range."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{name} must be a port (0-65535) or range 'N-M', got bool {value!r}"
+        )
+    s = str(value).strip()
+    # Range form
+    if "-" in s:
+        parts = s.split("-")
+        if len(parts) != 2:
+            raise ValueError(
+                f"{name} range must be 'N-M', got {value!r}"
+            )
+        try:
+            lo, hi = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise ValueError(
+                f"{name} range bounds must be integers, got {value!r}"
+            )
+        if not (0 <= lo <= 65535 and 0 <= hi <= 65535):
+            raise ValueError(
+                f"{name} range bounds must be in [0, 65535], got {value!r}"
+            )
+        if lo > hi:
+            raise ValueError(
+                f"{name} range start ({lo}) must be <= end ({hi})"
+            )
+        # Return the canonical form ("80-90") rather than the original
+        # surface string ("80 - 90", "0080-0090") so URL output is
+        # consistent regardless of how the caller formatted the input.
+        return f"{lo}-{hi}"
+    # Single-port form
+    try:
+        n = int(s)
+    except ValueError:
+        raise ValueError(
+            f"{name} must be a port (0-65535) or range 'N-M', got {value!r}"
+        )
+    if not (0 <= n <= 65535):
+        raise ValueError(
+            f"{name} must be in [0, 65535], got {n}"
+        )
+    return str(n)
+
+
+def is_path_search_error(status, body, err):
+    """True when a path search call did NOT succeed.
+
+    Centralises the rule that "the helper returned an err string AND a
+    parsed body" still means failure — for HTTP 4xx/5xx, run_path_search
+    returns BOTH a populated body (the parsed error response) and an err
+    string ("HTTP 401", "HTTP 409", etc.). Callers that only checked
+    `body is None` were misclassifying these as success and then trying
+    to read body["info"]["paths"], surfacing API errors as the
+    misleading "No paths returned. Check search parameters."
+
+    Use this wherever a tool needs to gate on "did the path search
+    actually deliver a usable result body."
+    """
+    if err is not None:
+        return True
+    if status is None:
+        return True
+    if not (200 <= status < 300):
+        return True
+    return False
+
+
+def extract_path_search_error_message(status, body, err):
+    """Best-effort human-readable error string for a failed path search.
+
+    Pulls the API's `message` field out of the parsed body when present
+    (Forward Networks ErrorInfo schema), otherwise falls back to the
+    err string from run_path_search, otherwise to a status code.
+    Always returns something — never None.
+    """
+    if isinstance(body, dict):
+        msg = body.get("message") or body.get("error") or body.get("_raw")
+        if msg:
+            # Trim noisy multi-line server error strings to one line.
+            msg = str(msg).strip().splitlines()[0][:300]
+            if err and err not in msg:
+                return f"{err}: {msg}"
+            return msg
+    if err:
+        return err
+    if status is not None:
+        return f"HTTP {status}"
+    return "Unknown path search error"
 
 
 def run_path_search(base_url, credentials, network_id, snapshot_id,
@@ -274,7 +548,23 @@ def run_path_search(base_url, credentials, network_id, snapshot_id,
                     intent="PREFER_DELIVERED",
                     max_candidates=5000, max_results=1, max_seconds=30,
                     ip_proto=None, dst_port=None,
-                    retries=1, retry_delay=3):
+                    retries=1, retry_delay=3,
+                    # Phase 1 item 4 pass-through params. Default None
+                    # everywhere so existing callers remain unaffected;
+                    # only the Builder UI's proxy path currently sends
+                    # any of these (it builds the URL in JS), but tools
+                    # that adopt them via this helper now produce
+                    # identical URLs across the toolkit. This is what
+                    # closes the cross-tool drift on includeNetworkFunctions.
+                    from_device=None,
+                    src_port=None,
+                    icmp_type=None,
+                    app_id=None,
+                    url_param=None,
+                    domain=None,
+                    include_tags=None,
+                    include_network_functions=None,
+                    max_return_path_results=None):
     """Run a Forward Networks Path Search API call.
 
     Single point of truth for path search across the toolkit. The socket
@@ -295,6 +585,17 @@ def run_path_search(base_url, credentials, network_id, snapshot_id,
                       (0 disables retry; default 1 = 2 attempts total)
       retry_delay:    seconds to sleep between attempts
 
+      Phase 1 item 4 pass-through params (all optional, all default None):
+      from_device:               source device name; maps to `from`
+      src_port:                  L4 source port or range string ("8080-8088")
+      icmp_type:                 implies ipProto=1
+      app_id:                    L7 app id, or "unidentified"
+      url_param:                 L7 URL pattern; maps to `url`
+      domain:                    L7 domain pattern (cannot combine with url)
+      include_tags:              bool/'true'/'false' — adds device tags per hop
+      include_network_functions: bool/'true'/'false' — adds detailed forwarding info
+      max_return_path_results:   int — return-path result cap (0–10000)
+
     Returns:
       (status, body_dict_or_None, elapsed_ms, error_or_None)
 
@@ -302,16 +603,35 @@ def run_path_search(base_url, credentials, network_id, snapshot_id,
       - On HTTP 4xx/5xx: (status_code, parsed_body_or_{"_raw": text}, ms, "HTTP {code}")
       - On transient failure with retries exhausted: (None, None, ms, str(exception))
       - On missing credentials: (None, None, 0, "No credentials for network {id}")
+      - On client-side validation failure (Phase 1 item 5): (None, None, 0, "ValueError: ...")
+        — caught here so callers don't need try/except for what is_path_search_error
+        already covers as a generic failure.
     """
     if network_id not in credentials:
         return None, None, 0, f"No credentials for network {network_id}"
 
-    url = build_path_search_url(
-        base_url, network_id, snapshot_id, src_ip, dst_ip,
-        intent=intent,
-        max_candidates=max_candidates, max_results=max_results, max_seconds=max_seconds,
-        ip_proto=ip_proto, dst_port=dst_port,
-    )
+    try:
+        url = build_path_search_url(
+            base_url, network_id, snapshot_id, src_ip, dst_ip,
+            intent=intent,
+            max_candidates=max_candidates, max_results=max_results, max_seconds=max_seconds,
+            ip_proto=ip_proto, dst_port=dst_port,
+            from_device=from_device,
+            src_port=src_port,
+            icmp_type=icmp_type,
+            app_id=app_id,
+            url_param=url_param,
+            domain=domain,
+            include_tags=include_tags,
+            include_network_functions=include_network_functions,
+            max_return_path_results=max_return_path_results,
+        )
+    except ValueError as ve:
+        # Validation failed before the URL was even built. Surface
+        # via the existing error tuple shape so is_path_search_error
+        # picks it up just like a transient failure or HTTP 4xx —
+        # no caller needs to add try/except around run_path_search.
+        return None, None, 0, f"ValueError: {ve}"
     req = urllib.request.Request(url)
     req.add_header("Authorization", credentials[network_id])
     req.add_header("Accept", "application/json")
