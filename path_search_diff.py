@@ -344,11 +344,13 @@ def read_config():
 
 
 def write_config(data):
-    """Merge data into the config file, preserving keys we don't own."""
+    """Merge data into the config file, preserving keys we don't own.
+
+    Item 10: writes go through _helpers.atomic_write_json so a kill -9
+    or concurrent reader/writer never sees a half-written file."""
     existing = read_config()
     existing.update(data)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(existing, f, indent=2)
+    _helpers.atomic_write_json(CONFIG_FILE, existing)
 
 
 def load_filters():
@@ -393,12 +395,14 @@ def _ensure_filters_file():
     Does not overwrite or merge into an existing file — the file is the source of truth.
     If the user has deleted or never had the file, they get the seed defaults as a
     starting point. After that, all changes are made to the JSON directly.
+
+    Item 10: write goes through atomic_write_json so a partial seed
+    never lands on disk if the process dies during initial bootstrap.
     """
     if os.path.exists(FILTERS_FILE):
         return
     try:
-        with open(FILTERS_FILE, "w") as f:
-            json.dump(_SEED_FILTERS, f, indent=2)
+        _helpers.atomic_write_json(FILTERS_FILE, _SEED_FILTERS)
         print(f"  ✓  Created {FILTERS_FILE} with default filter patterns.")
     except Exception as e:
         print(f"  ⚠  Could not write {FILTERS_FILE}: {e}")

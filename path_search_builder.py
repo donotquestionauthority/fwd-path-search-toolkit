@@ -54,11 +54,13 @@ def read_config():
 
 def write_config(data):
     """Merge data into the config file, preserving keys we don't own
-    (e.g. diffSavedSearches written by path_search_diff.py)."""
+    (e.g. diffSavedSearches written by path_search_diff.py).
+
+    Item 10: writes go through _helpers.atomic_write_json so a kill -9
+    or concurrent reader/writer never sees a half-written file."""
     existing = read_config()
     existing.update(data)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(existing, f, indent=2)
+    _helpers.atomic_write_json(CONFIG_FILE, existing)
 HTML = r"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2152,6 +2154,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 req_data   = json.loads(raw)
                 url        = req_data['url']
                 network_id = req_data['networkId']
+
+                # Item 10: URL allowlist. The proxy attaches the user's
+                # Forward Networks credential to outgoing requests, so
+                # we must not let the browser send arbitrary URLs
+                # through it. Restrict to URLs targeting this instance's
+                # /api/ tree. Practically not exploitable on a localhost-
+                # only server (only the same JS we ship can call /proxy)
+                # but a free defense-in-depth measure: a saved search
+                # with a tampered URL field, a future bug that lets the
+                # browser see network IDs it shouldn't, or any path that
+                # ever exposes /proxy beyond localhost would all become
+                # exfiltration vectors without this check.
+                allowed_prefix = BASE_URL.rstrip('/') + '/api/'
+                if not url.startswith(allowed_prefix):
+                    self._respond(400, 'application/json',
+                        json.dumps({
+                            'error': f'Proxy refused: URL must start with {allowed_prefix}'
+                        }).encode())
+                    return
 
                 if network_id not in CREDENTIALS:
                     self._respond(200, 'application/json',

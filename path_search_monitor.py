@@ -51,7 +51,30 @@ def _load_discovery():
     spec.loader.exec_module(mod)
     return mod
 
+import threading
+
+# Item 10: module-level lock guarding read-modify-write of MONITOR_FILE.
+# Every HTTP handler that reads-modifies-writes the watchlist must hold
+# this lock across BOTH operations — taking it only inside
+# write_monitor_data() would let two concurrent handlers each read the
+# pre-modification state, each apply their delta, and the second writer
+# clobbers the first. With item 8's client-side per-entry polling the
+# concurrent-write window is much narrower than the old synchronous
+# /api/run-all but two browser tabs of the monitor open simultaneously
+# can still race; this is cheap insurance.
+#
+# The lock is reentrant (RLock, not Lock) so a handler can call other
+# helpers that also take the lock without deadlocking itself. None of
+# the current handlers nest, but the RLock cost is negligible and it
+# protects future code from a subtle deadlock.
+_MONITOR_LOCK = threading.RLock()
+
+
 def read_monitor_data():
+    """Read the watchlist file. Caller must hold _MONITOR_LOCK if a
+    write will follow based on this read; otherwise it's safe to call
+    without the lock since reads of a fully-written file are atomic
+    enough on local filesystems."""
     if not os.path.exists(MONITOR_FILE):
         return {"entries": []}
     try:
@@ -65,8 +88,11 @@ def read_monitor_data():
 
 
 def write_monitor_data(data):
-    with open(MONITOR_FILE, "w") as f:
-        json.dump(data, f, indent=2)
+    """Atomically write the watchlist file. Item 10: uses
+    atomic_write_json so the file is replaced via os.replace rather
+    than truncated and overwritten in place — readers see either the
+    old or the new contents, never a partial file."""
+    _helpers.atomic_write_json(MONITOR_FILE, data)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -523,8 +549,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
         path   = self.path.split("?")[0]
 
         if path == "/api/entries":
-            # Add new entry
-            data = read_monitor_data()
+            # Add new entry. Item 10: the lock guards only the
+            # read-modify-write of the watchlist file, not the
+            # external API calls (favorite_snapshot, set_snapshot_note).
+            # Holding the lock across those calls would mean a slow
+            # API response in one browser tab blocks every other
+            # request to the monitor for the duration. Doing the API
+            # calls unlocked first, then taking the lock to re-read
+            # and merge, is safe because the mutation is "append my
+            # entry" — concurrent appenders both succeed.
             entry = {
                 "id":                 _now_iso().replace(":", "-").replace(".", "-"),
                 "caseId":             body.get("caseId") or None,
@@ -550,13 +583,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "totalSubsequent":    0,
                 "runResults":         [],
             }
-            # Favorite and annotate the baseline snapshot
+            # Favorite and annotate the baseline snapshot — done
+            # unlocked since these are external API calls that don't
+            # touch the watchlist file.
             fav_status, _, fav_err = favorite_snapshot(entry["networkId"], entry["baselineSnapshotId"])
             note = build_monitoring_note(entry["caseId"], entry["jiraId"])
             note_status, _, note_err = set_snapshot_note(entry["networkId"], entry["baselineSnapshotId"], note)
 
-            data["entries"].append(entry)
-            write_monitor_data(data)
+            with _MONITOR_LOCK:
+                data = read_monitor_data()
+                data["entries"].append(entry)
+                write_monitor_data(data)
+
             self._json({
                 "entry": entry,
                 "favoriteStatus": fav_status,
@@ -566,58 +604,91 @@ class Handler(http.server.BaseHTTPRequestHandler):
             })
 
         elif path == "/api/run-all":
-            # Run checks for all active entries, streaming JSON progress
-            data    = read_monitor_data()
-            active  = [e for e in data["entries"] if e.get("status") == "active"]
+            # Run checks for all active entries, streaming JSON progress.
+            # Note: with item 8's client-side per-entry polling, the
+            # browser hits /api/run-one in a loop instead of this
+            # endpoint. /api/run-all is kept for scripted callers and
+            # for the legacy synchronous fallback.
+            #
+            # Item 10: API calls (run_entry_check) run outside the lock
+            # — holding the lock through every entry's API calls would
+            # block the entire monitor for many minutes. The lock is
+            # taken only to apply the per-entry result back into the
+            # watchlist, and then released between entries.
+            with _MONITOR_LOCK:
+                data    = read_monitor_data()
+                active  = [e for e in data["entries"] if e.get("status") == "active"]
             updated = []
             for entry in active:
                 result = run_entry_check(entry)
-                # Update in data
-                for i, e in enumerate(data["entries"]):
-                    if e["id"] == result["id"]:
-                        data["entries"][i] = result
-                        break
+                with _MONITOR_LOCK:
+                    # Re-read inside the lock so a concurrent /api/run-one
+                    # for a different entry doesn't lose its update when
+                    # we write back.
+                    data = read_monitor_data()
+                    for i, e in enumerate(data["entries"]):
+                        if e["id"] == result["id"]:
+                            data["entries"][i] = result
+                            break
+                    write_monitor_data(data)
                 updated.append(result)
-            write_monitor_data(data)
             self._json({"updated": updated})
 
         elif path == "/api/run-one":
             entry_id = body.get("id")
-            data     = read_monitor_data()
-            entry    = next((e for e in data["entries"] if e["id"] == entry_id), None)
+            # Item 10: snapshot the entry under the lock, run the
+            # external check unlocked, then re-read and merge under
+            # the lock. Same rationale as /api/entries.
+            with _MONITOR_LOCK:
+                data  = read_monitor_data()
+                entry = next((e for e in data["entries"] if e["id"] == entry_id), None)
             if not entry:
                 self._json({"error": "Entry not found"}, 404); return
             result = run_entry_check(entry)
-            for i, e in enumerate(data["entries"]):
-                if e["id"] == entry_id:
-                    data["entries"][i] = result
-                    break
-            write_monitor_data(data)
+            with _MONITOR_LOCK:
+                data = read_monitor_data()
+                for i, e in enumerate(data["entries"]):
+                    if e["id"] == entry_id:
+                        data["entries"][i] = result
+                        break
+                write_monitor_data(data)
             self._json(result)
 
         elif path == "/api/archive":
             entry_id = body.get("id")
-            data     = read_monitor_data()
+            # Item 10: export_evidence may write a zip file and is the
+            # slow step here, but it doesn't mutate the watchlist
+            # itself. Read the entry under the lock, do the export
+            # unlocked, then take the lock again to apply the status
+            # change.
+            with _MONITOR_LOCK:
+                data = read_monitor_data()
+                target_entry = next((e for e in data["entries"] if e["id"] == entry_id), None)
             zip_path = None
-            for i, e in enumerate(data["entries"]):
-                if e["id"] == entry_id:
-                    try:
-                        zip_path = export_evidence(e)
-                    except Exception as ex:
-                        zip_path = None
-                        print(f"  ⚠  Evidence export failed: {ex}")
-                    data["entries"][i]["status"]      = "archived"
-                    data["entries"][i]["archivedAt"]  = _now_iso()
-                    data["entries"][i]["evidencePath"] = zip_path
-                    break
-            write_monitor_data(data)
+            if target_entry is not None:
+                try:
+                    zip_path = export_evidence(target_entry)
+                except Exception as ex:
+                    zip_path = None
+                    print(f"  ⚠  Evidence export failed: {ex}")
+            with _MONITOR_LOCK:
+                data = read_monitor_data()
+                for i, e in enumerate(data["entries"]):
+                    if e["id"] == entry_id:
+                        data["entries"][i]["status"]      = "archived"
+                        data["entries"][i]["archivedAt"]  = _now_iso()
+                        data["entries"][i]["evidencePath"] = zip_path
+                        break
+                write_monitor_data(data)
             self._json({"evidencePath": zip_path})
 
         elif path == "/api/delete":
             entry_id = body.get("id")
-            data     = read_monitor_data()
-            data["entries"] = [e for e in data["entries"] if e["id"] != entry_id]
-            write_monitor_data(data)
+            # Item 10: simple read-modify-write, no external calls — lock spans both.
+            with _MONITOR_LOCK:
+                data = read_monitor_data()
+                data["entries"] = [e for e in data["entries"] if e["id"] != entry_id]
+                write_monitor_data(data)
             self._json({"ok": True})
 
         else:

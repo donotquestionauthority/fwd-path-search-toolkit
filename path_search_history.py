@@ -52,11 +52,13 @@ def read_config():
 
 def write_config(data):
     """Merge data into the config file, preserving keys we don't own
-    (e.g. diffSavedSearches written by path_search_diff.py)."""
+    (e.g. diffSavedSearches written by path_search_diff.py).
+
+    Item 10: writes go through _helpers.atomic_write_json so a kill -9
+    or concurrent reader/writer never sees a half-written file."""
     existing = read_config()
     existing.update(data)
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(existing, f, indent=2)
+    _helpers.atomic_write_json(CONFIG_FILE, existing)
 
 # Device types the API considers "firewall" across all platforms.
 # Imported from fwd_helpers so all tools agree on the set.

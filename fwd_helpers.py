@@ -17,6 +17,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -237,6 +238,65 @@ FIREWALL_TYPES = frozenset((
     "AWS_NETWORK_FIREWALL",
     "AZURE_FIREWALL",
 ))
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Atomic file writes (item 10)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_atomic_write_counter = [0]
+_atomic_write_counter_lock = threading.Lock()
+
+
+def atomic_write_json(path, data, indent=2):
+    """Write `data` as JSON to `path` atomically.
+
+    Pattern: serialise to a sibling temp file, fsync it, then os.replace
+    onto the target path. os.replace is atomic on POSIX — readers see
+    either the old contents or the new contents in their entirety, never
+    a partial / truncated file. Without this, a kill -9 mid-write (or a
+    concurrent writer racing the same file) could leave the JSON file
+    truncated and unparseable on next read.
+
+    Temp file name combines the PID with a per-process monotonic counter
+    so that two threads (or two coroutines, etc.) inside the same
+    process writing to the same target file never collide on the same
+    temp file. PID alone is sufficient across processes but not within
+    one — without the counter, thread A writing to <path>.tmp.<pid>
+    and thread B doing the same race each other on truncate / replace
+    and one of them sees FileNotFoundError when its os.replace tries
+    to rename a file the other already replaced away.
+
+    The caller is still responsible for any cross-call locking — this
+    function only guarantees the *write itself* is atomic, not that the
+    full read-modify-write pattern in caller code is. For the watchlist
+    file (which has read-modify-write semantics across HTTP requests),
+    see _MONITOR_LOCK in path_search_monitor.py.
+    """
+    with _atomic_write_counter_lock:
+        _atomic_write_counter[0] += 1
+        seq = _atomic_write_counter[0]
+    tmp = f"{path}.tmp.{os.getpid()}.{seq}"
+    try:
+        with open(tmp, "w") as f:
+            json.dump(data, f, indent=indent)
+            f.flush()
+            try:
+                os.fsync(f.fileno())
+            except OSError:
+                # fsync can fail on some filesystems / mount options.
+                # Continue — os.replace still gives us the atomic swap;
+                # we just lose the durability guarantee that fsync adds.
+                pass
+        os.replace(tmp, path)
+    except Exception:
+        # Best-effort cleanup of the temp file on any failure path so
+        # we don't accumulate <file>.tmp.<pid>.<seq> orphans.
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ─────────────────────────────────────────────────────────────────────────────
