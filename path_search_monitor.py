@@ -1298,6 +1298,12 @@ async function runOne(id) {
 // renderEntryList(). Previously a single failure caused alert() and
 // terminated, which on a long run was strictly worse than soldiering on.
 let runAllAbort = false;
+// Item 8 review fix (blocker 2): hide timer handle. The progress bar
+// is hidden 2.5s after a run ends so the user has time to read the
+// final status. If they click Run All again within that window, the
+// pending hide must be cancelled — otherwise it fires mid-new-run
+// and yanks the progress bar away while it's still updating.
+let runAllHideTimer = null;
 
 async function runAll() {
   const active = entries.filter(e => e.status === 'active');
@@ -1315,13 +1321,25 @@ async function runAll() {
   stopBtn.style.display = 'inline-block';
   stopBtn.disabled      = false;
   prog.style.display = 'flex';
+  // Item 8 review fix (blocker 2): if a previous run scheduled a
+  // delayed hide that hasn't fired yet, cancel it. Otherwise it
+  // would fire mid-run and hide the progress bar at the wrong time.
+  if (runAllHideTimer) {
+    clearTimeout(runAllHideTimer);
+    runAllHideTimer = null;
+  }
 
   let done = 0, errors = 0;
   try {
-    for (const entry of active) {
+    // Indexed loop instead of for-of + active.indexOf(entry). The
+    // indexOf approach was O(n) per iteration and slightly fragile
+    // if duplicate references ever ended up in the list; cleaner to
+    // walk by index since we need it for the progress label anyway.
+    for (let i = 0; i < active.length; i++) {
       if (runAllAbort) break;
+      const entry = active[i];
+      const idx = i + 1;
 
-      const idx = active.indexOf(entry) + 1;
       label.textContent = `(${idx}/${active.length}) ${entryLabel(entry)}…`;
       bar.style.width = Math.round((done / active.length) * 100) + '%';
 
@@ -1367,6 +1385,13 @@ async function runAll() {
 
     bar.style.width = '100%';
     if (runAllAbort) {
+      // Item 8 review fix (blocker 1): a stopped run shows the actual
+      // completed percentage, not 100%. Reporting "Stopped. 3/10 completed"
+      // alongside a full bar was visually contradictory and made it look
+      // like the run had finished when it had been cut short. Override
+      // the bar back to the real ratio for the stopped case.
+      const pct = Math.round((done / active.length) * 100);
+      bar.style.width = pct + '%';
       label.textContent = `Stopped. ${done}/${active.length} completed${errors ? `, ${errors} error(s)` : ''}.`;
     } else if (errors) {
       label.textContent = `Done. ${done}/${active.length} completed, ${errors} error(s).`;
@@ -1378,8 +1403,14 @@ async function runAll() {
     runBtn.textContent = '▶ Run All';
     stopBtn.style.display = 'none';
     // Hide the progress bar after a short delay so the user has time
-    // to read the final status message.
-    setTimeout(() => { prog.style.display = 'none'; bar.style.width = '0%'; }, 2500);
+    // to read the final status message. Handle is tracked in
+    // runAllHideTimer so a subsequent runAll() can cancel it before
+    // it fires mid-new-run (item 8 review fix, blocker 2).
+    runAllHideTimer = setTimeout(() => {
+      prog.style.display = 'none';
+      bar.style.width = '0%';
+      runAllHideTimer = null;
+    }, 2500);
   }
 }
 
