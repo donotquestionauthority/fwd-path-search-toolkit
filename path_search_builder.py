@@ -782,16 +782,51 @@ function onNetworkSelect() {
 function updateCredIndicator() {
   const idx = document.getElementById('network-select').value;
   const el  = document.getElementById('cred-indicator');
-  const runBtn = document.getElementById('run-btn');
   if (idx === '') {
     el.innerHTML = '';
-    runBtn.disabled = true;
+    refreshRunGate();
     return;
   }
   const netId = discoveredNetworks[parseInt(idx)].id;
   const hasCred = credentialedNetworks.has(netId);
   el.innerHTML = `<span class="cred-dot ${hasCred ? 'has' : 'none'}" title="${hasCred ? 'Credentials loaded' : 'No credentials for this network'}"></span>`;
-  runBtn.disabled = !hasCred;
+  refreshRunGate();
+}
+
+// Item 6: Run-button gating. The button must only enable when we have
+// EVERYTHING the API actually needs — credentials AND a selected
+// network AND non-empty srcIp/dstIp. Previously the gate was just
+// `!hasCred`, so a click with empty srcIp would proceed to the proxy,
+// fail with HTTP 400, and surface as a generic ERROR badge — the
+// validation message in the panel below was easy to miss. The tooltip
+// makes the disable reason discoverable; the help text in the
+// validation div remains the canonical "what's missing" display.
+function refreshRunGate() {
+  const runBtn = document.getElementById('run-btn');
+  const idx    = document.getElementById('network-select').value;
+  const srcIp  = document.getElementById('srcIp').value.trim();
+  const dstIp  = document.getElementById('dstIp').value.trim();
+
+  let hasCred  = false;
+  let netId    = '';
+  if (idx !== '' && discoveredNetworks[parseInt(idx)]) {
+    netId   = discoveredNetworks[parseInt(idx)].id;
+    hasCred = credentialedNetworks.has(netId);
+  }
+
+  const reasons = [];
+  if (!netId)   reasons.push('select a network');
+  if (!hasCred) reasons.push('no credentials for this network');
+  if (!srcIp)   reasons.push('srcIp required');
+  if (!dstIp)   reasons.push('dstIp required');
+
+  if (reasons.length) {
+    runBtn.disabled = true;
+    runBtn.title    = 'Cannot run: ' + reasons.join('; ');
+  } else {
+    runBtn.disabled = false;
+    runBtn.title    = 'Execute path search';
+  }
 }
 
 function renderSnapshotDropdown(selectedSnapId) {
@@ -994,6 +1029,10 @@ function update() {
   const url = `${base || 'https://fwd.app'}${path}${qs ? '?' + qs : ''}`;
   document.getElementById('url-display').textContent = url;
   buildAppStrings();
+
+  // Re-evaluate Run-button gating on every form change so srcIp/dstIp
+  // edits enable/disable the button live (item 6).
+  refreshRunGate();
 }
 
 // ── Raw response store (for copy/download) ────────────────────────────────────
@@ -1840,6 +1879,105 @@ function copyUrl() {
   navigator.clipboard.writeText(url).then(() => flashCopyStatus('✓ API URL copied!'));
 }
 
+// Item 6: clearAll hygiene. Previously this reset the form fields and
+// the JSON output but left the URL panel, App URL display, response
+// timer, all three filter toolbars, the firewall summary, and the
+// nav/filter pills full of stale data from the last Run. After Clear,
+// the right pane visibly looked like the previous result was still
+// present — only the JSON box was empty. resetResponseState() now
+// owns every UI surface that comes online during a Run, so Clear
+// returns the right pane to its boot-time appearance.
+function resetResponseState() {
+  // URL panel — hide the whole panel and clear the three URL displays
+  // so the toolbar's URL chevron doesn't open onto stale data.
+  const urlPanel = document.getElementById('url-panel');
+  if (urlPanel) urlPanel.style.display = 'none';
+  const urlDisp = document.getElementById('url-display');
+  if (urlDisp) urlDisp.textContent = '';
+  const appSearch = document.getElementById('app-search-display');
+  if (appSearch) appSearch.textContent = '';
+  const appUrl = document.getElementById('app-url-display');
+  if (appUrl) appUrl.textContent = '';
+
+  // Response toolbar badges
+  const respStatus = document.getElementById('resp-status');
+  if (respStatus) { respStatus.style.display = 'none'; respStatus.textContent = ''; }
+  const respTime = document.getElementById('resp-time');
+  if (respTime)   { respTime.style.display   = 'none'; respTime.textContent   = ''; }
+  const respSep = document.getElementById('resp-sep');
+  if (respSep)    respSep.style.display = 'none';
+
+  // Re-disable the copy/download buttons (they enable when we have a body)
+  const copyBtn = document.getElementById('copy-resp-btn');
+  if (copyBtn) copyBtn.disabled = true;
+  const dlBtn = document.getElementById('dl-raw-btn');
+  if (dlBtn) dlBtn.disabled = true;
+
+  // Results toolbars (nav, filters, hop filters)
+  const resultsTb = document.getElementById('results-toolbar');
+  if (resultsTb) resultsTb.style.display = 'none';
+  const filterTb = document.getElementById('filter-toolbar');
+  if (filterTb) filterTb.style.display = 'none';
+  const hopFilterTb = document.getElementById('hop-filter-toolbar');
+  if (hopFilterTb) hopFilterTb.style.display = 'none';
+
+  // Filter pill containers — empty their inner HTML so old pills
+  // don't briefly flash if the toolbars are re-shown.
+  ['filter-forwarding','filter-security','filter-devicetype',
+   'filter-devicename-pills','filter-displayname-pills']
+    .forEach(id => {
+      const el = document.getElementById(id);
+      if (el) el.innerHTML = '';
+    });
+
+  // Hop filter input fields and their autocomplete dropdowns
+  ['filter-devicename-input','filter-displayname-input'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  ['ac-devicename','ac-displayname'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) { el.style.display = 'none'; el.innerHTML = ''; }
+  });
+
+  const filterCount = document.getElementById('filter-count');
+  if (filterCount) filterCount.textContent = '';
+  const navTotal = document.getElementById('nav-total');
+  if (navTotal) navTotal.textContent = '';
+  const navPos = document.getElementById('nav-pos');
+  if (navPos) navPos.textContent = '';
+  const navHops = document.getElementById('nav-hops');
+  if (navHops) navHops.textContent = '';
+
+  // Firewall summary panel — fully collapsed AND hidden
+  const fwSum = document.getElementById('fw-summary');
+  if (fwSum) fwSum.style.display = 'none';
+  const fwSumBody = document.getElementById('fw-summary-body');
+  if (fwSumBody) fwSumBody.style.display = 'none';
+  const fwSumChev = document.getElementById('fw-summary-chevron');
+  if (fwSumChev) fwSumChev.style.transform = '';
+  const fwSumBadge = document.getElementById('fw-summary-badge');
+  if (fwSumBadge) fwSumBadge.textContent = '';
+
+  // JSON output back to placeholder
+  const jsonOut = document.getElementById('json-output');
+  if (jsonOut) jsonOut.innerHTML = '<span class="j-empty">Hit ▶ Run to execute the query against the API.</span>';
+
+  // JS-side state. These persist across runs and accumulate stale
+  // path data + filter selections if not reset.
+  lastRawResponse   = null;
+  allPaths          = [];
+  filteredPaths     = [];
+  currentPathIdx    = 0;
+  activeForwarding  = new Set();
+  activeSecurity    = new Set();
+  activeDeviceTypes = new Set();
+  activeDeviceNames = new Set();
+  activeDisplayNames= new Set();
+  allHopValues      = { deviceType: new Set(), deviceName: new Set(), displayName: new Set() };
+  showEnvelope      = false;
+}
+
 function clearAll() {
   document.getElementById('base').value = 'https://fwd.app';
   document.getElementById('network-select').value = '';
@@ -1847,14 +1985,18 @@ function clearAll() {
   document.getElementById('snapshot-id-display').textContent = '';
   document.getElementById('saved-select').value = '';
   document.getElementById('cred-indicator').innerHTML = '';
-  document.getElementById('run-btn').disabled = true;
   renderSnapshotDropdown();
   ['srcIp','dstIp','ipProto','dstPort','maxCandidates','maxResults','maxSeconds']
     .forEach(id => document.getElementById(id).value = '');
   document.getElementById('i0').checked   = true;
   document.getElementById('inf0').checked = true;
-  document.getElementById('json-output').innerHTML = '<span class="j-empty">Hit ▶ Run to execute the query against the API.</span>';
-  document.getElementById('resp-status').style.display = 'none';
+
+  // Wipe all response-side state — see resetResponseState comment.
+  resetResponseState();
+
+  // refreshRunGate() runs as part of update() below; explicit call
+  // unnecessary. update() also rebuilds the URL display from the now-
+  // empty inputs.
   update();
 }
 
