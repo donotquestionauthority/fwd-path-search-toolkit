@@ -12,9 +12,11 @@ Import with:
 """
 
 import base64
+import errno
 import http.server
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
@@ -47,6 +49,7 @@ def parse_args(argv=None):
       --keychain                Load credentials from macOS Keychain (requires --instance + --network)
       --instance <hostname>     Forward Networks instance hostname, e.g. fwd.app
       --network  <id>           Network ID to load (repeatable)
+      --port     <n>            Preferred port to bind (falls back if in use)
 
     Returns a dict:
       {
@@ -54,6 +57,7 @@ def parse_args(argv=None):
         "use_keychain": bool,
         "instance": str or None,
         "network_ids": [str, ...],
+        "port": int or None,
       }
     """
     if argv is None:
@@ -64,6 +68,7 @@ def parse_args(argv=None):
         "use_keychain": False,
         "instance":     None,
         "network_ids":  [],
+        "port":         None,
     }
 
     i = 0
@@ -77,6 +82,12 @@ def parse_args(argv=None):
             result["instance"] = argv[i + 1]; i += 1
         elif arg == "--network" and i + 1 < len(argv):
             result["network_ids"].append(argv[i + 1]); i += 1
+        elif arg == "--port" and i + 1 < len(argv):
+            try:
+                result["port"] = int(argv[i + 1])
+            except ValueError:
+                print(f"  ⚠  --port expects an integer, got '{argv[i + 1]}' — ignoring.")
+            i += 1
         i += 1
 
     return result
@@ -742,6 +753,71 @@ def run_path_search(base_url, credentials, network_id, snapshot_id,
             continue
 
     return None, None, round((time.time() - t0) * 1000), last_err
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Port selection
+# ─────────────────────────────────────────────────────────────────────────────
+
+# The default ports the toolkit tools prefer. Fallback scanning skips these so
+# a tool that can't get its own default never lands on another tool's default.
+RESERVED_PORTS = frozenset({8760, 8765, 8766, 8767, 8768, 8769})
+
+
+def _port_is_free(port, host="127.0.0.1"):
+    """Return True if a TCP socket can bind (host, port) right now."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port))
+            return True
+        except OSError:
+            return False
+
+
+def find_free_port(preferred, host="127.0.0.1", reserved=RESERVED_PORTS, max_scan=200):
+    """Return an available port, preferring `preferred`.
+
+    If `preferred` is busy, scans upward from just above the reserved range so
+    fallback ports never collide with another toolkit tool's default. Used by
+    the launcher to assign ports up front. Note: availability can change between
+    this check and an actual bind, so servers should still bind defensively via
+    bind_toolkit_server().
+    """
+    if _port_is_free(preferred, host):
+        return preferred
+    base = (max(reserved) + 1) if reserved else preferred + 1
+    for candidate in range(base, base + max_scan):
+        if candidate in reserved:
+            continue
+        if _port_is_free(candidate, host):
+            return candidate
+    raise OSError(f"No free port found near {preferred} (scanned {max_scan}).")
+
+
+def bind_toolkit_server(handler, preferred_port, host="127.0.0.1",
+                        reserved=RESERVED_PORTS, max_scan=200):
+    """Create a ToolkitServer bound to an available port.
+
+    Tries `preferred_port` first; if it is already in use (EADDRINUSE, e.g. the
+    port is held by another app such as Okta Verify), scans upward from just
+    above the reserved range for the next free port so a busy port never stops
+    the tool from starting. Read the actual port via server.server_address[1].
+    """
+    candidates = [preferred_port]
+    base = (max(reserved) + 1) if reserved else preferred_port + 1
+    candidates += [p for p in range(base, base + max_scan) if p not in reserved]
+
+    last_err = None
+    for port in candidates:
+        try:
+            return ToolkitServer((host, port), handler)
+        except OSError as e:
+            if e.errno in (errno.EADDRINUSE, errno.EACCES):
+                last_err = e
+                continue
+            raise
+    raise OSError(f"Could not bind a port near {preferred_port}: {last_err}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -2525,15 +2525,18 @@ def run():
     BASE_URL, NETWORKS_DATA = _helpers.collect_credentials(
         CREDENTIALS, args, _load_discovery().discover_all)
 
-    server = _helpers.ToolkitServer(('127.0.0.1', PORT), Handler)
+    server = _helpers.bind_toolkit_server(Handler, args.get('port') or PORT)
+    actual_port = server.server_address[1]
+    if actual_port != PORT:
+        print(f"  ⚠  Port {args.get('port') or PORT} in use — using {actual_port} instead.")
 
     if not args['no_browser']:
         def open_browser():
             time.sleep(0.4)
-            webbrowser.open(f'http://localhost:{PORT}')
+            webbrowser.open(f'http://localhost:{actual_port}')
         threading.Thread(target=open_browser, daemon=True).start()
 
-    print(f'     Running at: http://localhost:{PORT}')
+    print(f'     Running at: http://localhost:{actual_port}')
     print(f'     Press Ctrl\u2013C to quit\n')
 
     try:

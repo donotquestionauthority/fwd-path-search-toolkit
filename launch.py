@@ -15,6 +15,8 @@ import urllib.request
 import webbrowser
 
 HOME_PORT = 8760
+# Actual home port used this run — may differ from HOME_PORT if 8760 is busy.
+ACTUAL_HOME_PORT = HOME_PORT
 
 TOOLS = [
     {
@@ -65,6 +67,28 @@ def _load_helpers():
     return _m
 
 
+def assign_ports():
+    """Pick a free port for each tool, preferring its default.
+
+    Mutates TOOLS in place so the home page links and /status checks point at
+    the ports the tools will actually bind. Ports handed out in this pass are
+    tracked so two tools never receive the same fallback port.
+    """
+    helpers = _load_helpers()
+    taken = set()
+    for tool in TOOLS:
+        default = tool["port"]
+        if helpers._port_is_free(default) and default not in taken:
+            chosen = default
+        else:
+            chosen = helpers.find_free_port(
+                default, reserved=helpers.RESERVED_PORTS | taken)
+        if chosen != default:
+            print(f"  ⚠  {tool['name']}: port {default} busy — assigning {chosen}.")
+        tool["port"] = chosen
+        taken.add(chosen)
+
+
 def launch_tools(extra_env=None):
     """Start all tool subprocesses.
     extra_env: dict of additional environment variables to inject (e.g. credentials).
@@ -79,7 +103,7 @@ def launch_tools(extra_env=None):
             print(f"  ⚠  {tool['script']} not found — skipping")
             continue
         proc = subprocess.Popen(
-            [sys.executable, script, '--no-browser'],
+            [sys.executable, script, '--no-browser', '--port', str(tool["port"])],
             cwd=script_dir,
             env=env,
         )
@@ -253,7 +277,7 @@ def build_home_html() -> str:
     ])
     return (HOME_HTML
             .replace("TOOLS_JSON", tools_json)
-            .replace("HOME_PORT", str(HOME_PORT)))
+            .replace("HOME_PORT", str(ACTUAL_HOME_PORT)))
 
 
 class HomeHandler(http.server.BaseHTTPRequestHandler):
@@ -344,17 +368,25 @@ def run():
         else:
             print(f"  ✓  {found} FWD_CREDS_* variable(s) found in environment.")
 
+    # Pick a free port for each tool (preferring its default) before launching,
+    # so the home page links and status checks match what the tools bind.
+    assign_ports()
+
     launch_tools(extra_env=extra_env if extra_env else None)
 
-    server = helpers.ToolkitServer(("127.0.0.1", HOME_PORT), HomeHandler)
+    server = helpers.bind_toolkit_server(HomeHandler, HOME_PORT)
+    global ACTUAL_HOME_PORT
+    ACTUAL_HOME_PORT = server.server_address[1]
+    if ACTUAL_HOME_PORT != HOME_PORT:
+        print(f"  ⚠  Home port {HOME_PORT} busy — using {ACTUAL_HOME_PORT} instead.")
 
     def open_browser():
         time.sleep(0.6)
-        webbrowser.open(f"http://localhost:{HOME_PORT}")
+        webbrowser.open(f"http://localhost:{ACTUAL_HOME_PORT}")
 
     threading.Thread(target=open_browser, daemon=True).start()
 
-    print(f"\n  Home page: http://localhost:{HOME_PORT}")
+    print(f"\n  Home page: http://localhost:{ACTUAL_HOME_PORT}")
     print(f"  Press Ctrl+C to stop all tools\n")
 
     try:
